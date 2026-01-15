@@ -41,14 +41,6 @@ http://localhost:4000
 
 ---
 
-## 📁 Project Structure
-
-src/
-├─ app.ts # Express app configuration
-├─ index.ts # Server entry point
-
----
-
 ## 📌 Project Status
 
 This project is under active development.
