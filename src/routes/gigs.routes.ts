@@ -1,8 +1,10 @@
 import { Router } from "express";
-import { getGigs } from "../controllers/gigs.controller";
+import { supabase } from "../lib/supabase";
+import { createGig, getGigs } from "../controllers/gigs.controller";
 
 const router = Router();
 
 router.get("/", getGigs);
+router.post("/", createGig);
 
 export default router;
