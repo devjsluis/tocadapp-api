@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import gigsRoutes from "./routes/gigs.routes";
+import usersRoutes from "./routes/users.routes";
 
 const app = express();
 
@@ -16,5 +17,6 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/gigs", gigsRoutes);
+app.use("/users", usersRoutes);
 
 export default app;
