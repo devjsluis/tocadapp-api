@@ -1,50 +1,41 @@
 import { Request, Response } from "express";
-import { supabase } from "../lib/supabase";
+import { pool } from "../lib/db"; // Importamos el nuevo pool
 
 export const getGigs = async (_req: Request, res: Response) => {
-  const { data, error } = await supabase.from("gigs").select("*");
-
-  if (error) {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM gigs ORDER BY created_at DESC",
+    );
+    return res.json({
+      ok: true,
+      data: result.rows,
+      totals: { count: result.rowCount },
+    });
+  } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
-
-  return res.json({
-    ok: true,
-    data,
-    totals: {
-      count: data.length,
-    },
-  });
 };
 
 export const createGig = async (req: Request, res: Response) => {
   const { title, place, date, time, amount, hours, notes } = req.body;
 
-  if (!title || !place || !date || !time || !amount || !hours) {
-    return res.status(400).json({
-      error: "Missing required fields",
-    });
-  }
+  const sql = `
+    INSERT INTO gigs (title, place, date, time, amount, hours, notes)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    RETURNING *`;
 
-  const { data, error } = await supabase
-    .from("gigs")
-    .insert([
-      {
-        title,
-        place,
-        date,
-        time,
-        amount,
-        hours,
-        notes,
-      },
-    ])
-    .select()
-    .single();
-
-  if (error) {
+  try {
+    const result = await pool.query(sql, [
+      title,
+      place,
+      date,
+      time,
+      amount,
+      hours,
+      notes,
+    ]);
+    return res.status(201).json(result.rows[0]);
+  } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
-
-  return res.status(201).json(data);
 };
