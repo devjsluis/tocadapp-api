@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { pool } from "../lib/db"; // Importamos el nuevo pool
+import { pool } from "../lib/db";
 
 export const getGigs = async (_req: Request, res: Response) => {
   try {
