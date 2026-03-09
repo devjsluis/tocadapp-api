@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import gigsRoutes from "./routes/gigs.routes";
 import usersRoutes from "./routes/users.routes";
+import musiciansRoutes from "./routes/musicians.routes";
 
 const app = express();
 
@@ -38,5 +39,6 @@ app.get("/health", (_req, res) => {
 
 app.use("/gigs", gigsRoutes);
 app.use("/users", usersRoutes);
+app.use("/musicians", musiciansRoutes);
 
 export default app;
