@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { pool } from "../lib/db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import { AuthRequest } from "../middleware/auth";
 
 export const createUser = async (req: Request, res: Response) => {
   const { email, name, lastName, password, role } = req.body;
@@ -61,7 +62,7 @@ export const loginUser = async (req: Request, res: Response) => {
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
-      "TU_SECRETO_SUPER_SECRETO",
+      process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO",
       { expiresIn: "24h" },
     );
 
@@ -77,6 +78,41 @@ export const loginUser = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(error);
     return res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const getMe = async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  try {
+    const result = await pool.query(
+      "SELECT id, email, name, last_name, role, created_at FROM users WHERE id = $1",
+      [userId],
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+    return res.json(result.rows[0]);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const updateMe = async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  const { name, last_name } = req.body;
+
+  if (!name || !last_name) {
+    return res.status(400).json({ error: "Nombre y apellido son obligatorios" });
+  }
+
+  try {
+    const result = await pool.query(
+      "UPDATE users SET name=$1, last_name=$2 WHERE id=$3 RETURNING id, email, name, last_name, role",
+      [name, last_name, userId],
+    );
+    return res.json(result.rows[0]);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 };
 

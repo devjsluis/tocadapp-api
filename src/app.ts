@@ -5,6 +5,8 @@ import { swaggerSpec } from "./swagger";
 import gigsRoutes from "./routes/gigs.routes";
 import usersRoutes from "./routes/users.routes";
 import musiciansRoutes from "./routes/musicians.routes";
+import bandsRoutes from "./routes/bands.routes";
+import { authMiddleware } from "./middleware/auth";
 
 const app = express();
 
@@ -62,8 +64,9 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, environment: process.env.NODE_ENV });
 });
 
-app.use("/gigs", gigsRoutes);
+app.use("/gigs", authMiddleware, gigsRoutes);
+app.use("/musicians", authMiddleware, musiciansRoutes);
 app.use("/users", usersRoutes);
-app.use("/musicians", musiciansRoutes);
+app.use("/bands", bandsRoutes);
 
 export default app;
