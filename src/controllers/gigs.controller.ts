@@ -115,10 +115,6 @@ export const setMyEarnings = async (req: AuthRequest, res: Response) => {
   const { amount, collected_amount } = req.body;
   const userId = req.user!.id;
 
-  if (amount === undefined || amount === null || amount === "") {
-    return res.status(400).json({ error: "El monto es obligatorio" });
-  }
-
   try {
     const gigCheck = await pool.query(
       `SELECT g.id FROM gigs g
