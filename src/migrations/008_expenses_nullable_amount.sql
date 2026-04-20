@@ -2,13 +2,8 @@
 ALTER TABLE gigs ALTER COLUMN amount DROP NOT NULL;
 ALTER TABLE gigs ALTER COLUMN amount SET DEFAULT NULL;
 
--- Tabla de gastos del músico
-CREATE TABLE IF NOT EXISTS expenses (
-  id          SERIAL PRIMARY KEY,
-  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  amount      NUMERIC NOT NULL,
-  category    VARCHAR(100) NOT NULL,
-  description TEXT,
-  date        DATE NOT NULL DEFAULT CURRENT_DATE,
-  created_at  TIMESTAMP DEFAULT NOW()
-);
+-- Adaptar tabla expenses existente a gastos del músico
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT 'Otro';
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS date DATE NOT NULL DEFAULT CURRENT_DATE;
+ALTER TABLE expenses ALTER COLUMN description DROP NOT NULL;
