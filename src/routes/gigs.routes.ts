@@ -5,6 +5,7 @@ import {
   updateGig,
   deleteGig,
   setMyEarnings,
+  setCollected,
   setAttending,
 } from "../controllers/gigs.controller";
 
@@ -13,6 +14,7 @@ const router = Router();
 router.get("/", getGigs);
 router.post("/", createGig);
 router.put("/:id/my-earnings", setMyEarnings);
+router.put("/:id/collected", setCollected);
 router.put("/:id/attending", setAttending);
 router.put("/:id", updateGig);
 router.delete("/:id", deleteGig);

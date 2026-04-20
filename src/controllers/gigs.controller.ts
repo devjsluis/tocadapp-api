@@ -9,6 +9,7 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
       `SELECT g.*, b.name AS band_name,
               (g.user_id = $1) AS is_owner,
               ge.amount AS my_amount,
+              ge.collected_amount AS my_collected,
               ga.attending AS my_attending
        FROM gigs g
        LEFT JOIN bands b ON g.band_id = b.id
@@ -111,7 +112,7 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
 
 export const setMyEarnings = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
-  const { amount } = req.body;
+  const { amount, collected_amount } = req.body;
   const userId = req.user!.id;
 
   if (amount === undefined || amount === null || amount === "") {
@@ -119,7 +120,6 @@ export const setMyEarnings = async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    // Verificar que el usuario puede ver este gig
     const gigCheck = await pool.query(
       `SELECT g.id FROM gigs g
        WHERE g.id = $1
@@ -134,13 +134,34 @@ export const setMyEarnings = async (req: AuthRequest, res: Response) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO gig_earnings (gig_id, user_id, amount)
-       VALUES ($1, $2, $3)
+      `INSERT INTO gig_earnings (gig_id, user_id, amount, collected_amount)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (gig_id, user_id)
-       DO UPDATE SET amount = $3
+       DO UPDATE SET amount = $3, collected_amount = $4
        RETURNING *`,
-      [id, userId, amount],
+      [id, userId, amount, collected_amount ?? null],
     );
+    return res.json({ ok: true, data: result.rows[0] });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const setCollected = async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const { amount } = req.body;
+  const userId = req.user!.id;
+
+  try {
+    const result = await pool.query(
+      `UPDATE gigs SET collected_amount = $1
+       WHERE id = $2 AND user_id = $3
+       RETURNING id, collected_amount`,
+      [amount ?? null, id, userId],
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Tocada no encontrada o no autorizado" });
+    }
     return res.json({ ok: true, data: result.rows[0] });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
