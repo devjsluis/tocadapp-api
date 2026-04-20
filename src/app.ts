@@ -6,6 +6,7 @@ import gigsRoutes from "./routes/gigs.routes";
 import usersRoutes from "./routes/users.routes";
 import musiciansRoutes from "./routes/musicians.routes";
 import bandsRoutes from "./routes/bands.routes";
+import expensesRoutes from "./routes/expenses.routes";
 import { authMiddleware } from "./middleware/auth";
 
 const app = express();
@@ -66,6 +67,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/gigs", authMiddleware, gigsRoutes);
 app.use("/musicians", authMiddleware, musiciansRoutes);
+app.use("/expenses", authMiddleware, expensesRoutes);
 app.use("/users", usersRoutes);
 app.use("/bands", bandsRoutes);
 
