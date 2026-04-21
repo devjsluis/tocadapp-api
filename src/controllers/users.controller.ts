@@ -3,7 +3,7 @@ import { pool } from "../lib/db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
-import * as Brevo from "@getbrevo/brevo";
+import axios from "axios";
 import { AuthRequest } from "../middleware/auth";
 
 export const createUser = async (req: Request, res: Response) => {
@@ -154,34 +154,33 @@ export const forgotPassword = async (req: Request, res: Response) => {
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
     const resetLink = `${frontendUrl}/reset-password?token=${token}`;
 
-    const apiInstance = new Brevo.TransactionalEmailsApi();
-    apiInstance.setApiKey(
-      Brevo.TransactionalEmailsApiApiKeys.apiKey,
-      process.env.BREVO_API_KEY!
+    await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      {
+        sender: { email: process.env.EMAIL_FROM_ADDRESS, name: "TocadApp" },
+        to: [{ email, name: user.name }],
+        subject: "Recupera tu contraseña - TocadApp",
+        htmlContent: `
+          <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; background: #09090b; color: #fff; border-radius: 12px; padding: 40px; border: 1px solid #27272a;">
+            <h2 style="color: #a855f7; margin-top: 0;">Recuperar contraseña</h2>
+            <p style="color: #a1a1aa;">Hola <strong style="color: #fff;">${user.name}</strong>,</p>
+            <p style="color: #a1a1aa;">Recibimos una solicitud para resetear tu contraseña en TocadApp. Haz clic en el botón para crear una nueva contraseña.</p>
+            <p style="text-align: center; margin: 32px 0;">
+              <a href="${resetLink}" style="background: #7e22ce; color: #fff; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Resetear contraseña</a>
+            </p>
+            <p style="color: #71717a; font-size: 13px;">Este enlace expira en <strong style="color: #a1a1aa;">1 hora</strong>. Si no solicitaste esto, puedes ignorar este correo.</p>
+            <hr style="border-color: #27272a; margin: 24px 0;" />
+            <p style="color: #52525b; font-size: 12px; margin: 0;">TocadApp · La app para músicos</p>
+          </div>
+        `,
+      },
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
     );
-
-    const sendSmtpEmail = new Brevo.SendSmtpEmail();
-    sendSmtpEmail.to = [{ email, name: user.name }];
-    sendSmtpEmail.sender = {
-      email: process.env.EMAIL_FROM_ADDRESS!,
-      name: "TocadApp",
-    };
-    sendSmtpEmail.subject = "Recupera tu contraseña - TocadApp";
-    sendSmtpEmail.htmlContent = `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; background: #09090b; color: #fff; border-radius: 12px; padding: 40px; border: 1px solid #27272a;">
-        <h2 style="color: #a855f7; margin-top: 0;">Recuperar contraseña</h2>
-        <p style="color: #a1a1aa;">Hola <strong style="color: #fff;">${user.name}</strong>,</p>
-        <p style="color: #a1a1aa;">Recibimos una solicitud para resetear tu contraseña en TocadApp. Haz clic en el botón para crear una nueva contraseña.</p>
-        <p style="text-align: center; margin: 32px 0;">
-          <a href="${resetLink}" style="background: #7e22ce; color: #fff; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Resetear contraseña</a>
-        </p>
-        <p style="color: #71717a; font-size: 13px;">Este enlace expira en <strong style="color: #a1a1aa;">1 hora</strong>. Si no solicitaste esto, puedes ignorar este correo.</p>
-        <hr style="border-color: #27272a; margin: 24px 0;" />
-        <p style="color: #52525b; font-size: 12px; margin: 0;">TocadApp · La app para músicos</p>
-      </div>
-    `;
-
-    await apiInstance.sendTransacEmail(sendSmtpEmail);
 
     return res.json({ message: SUCCESS_MSG });
   } catch (error: any) {
