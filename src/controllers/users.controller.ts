@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import { pool } from "../lib/db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import { randomBytes } from "crypto";
+import * as Brevo from "@getbrevo/brevo";
 import { AuthRequest } from "../middleware/auth";
 
 export const createUser = async (req: Request, res: Response) => {
@@ -113,6 +115,128 @@ export const updateMe = async (req: AuthRequest, res: Response) => {
     return res.json(result.rows[0]);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
+  }
+};
+
+export const forgotPassword = async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: "El correo es obligatorio" });
+  }
+
+  const SUCCESS_MSG = "Si el correo está registrado, recibirás un enlace en breve";
+
+  try {
+    const result = await pool.query(
+      "SELECT id, name FROM users WHERE email = $1",
+      [email]
+    );
+
+    if (result.rowCount === 0) {
+      return res.json({ message: SUCCESS_MSG });
+    }
+
+    const user = result.rows[0];
+    const token = randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await pool.query(
+      "UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false",
+      [user.id]
+    );
+
+    await pool.query(
+      "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
+      [user.id, token, expiresAt]
+    );
+
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const resetLink = `${frontendUrl}/reset-password?token=${token}`;
+
+    const apiInstance = new Brevo.TransactionalEmailsApi();
+    apiInstance.setApiKey(
+      Brevo.TransactionalEmailsApiApiKeys.apiKey,
+      process.env.BREVO_API_KEY!
+    );
+
+    const sendSmtpEmail = new Brevo.SendSmtpEmail();
+    sendSmtpEmail.to = [{ email, name: user.name }];
+    sendSmtpEmail.sender = {
+      email: process.env.EMAIL_FROM_ADDRESS!,
+      name: "TocadApp",
+    };
+    sendSmtpEmail.subject = "Recupera tu contraseña - TocadApp";
+    sendSmtpEmail.htmlContent = `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; background: #09090b; color: #fff; border-radius: 12px; padding: 40px; border: 1px solid #27272a;">
+        <h2 style="color: #a855f7; margin-top: 0;">Recuperar contraseña</h2>
+        <p style="color: #a1a1aa;">Hola <strong style="color: #fff;">${user.name}</strong>,</p>
+        <p style="color: #a1a1aa;">Recibimos una solicitud para resetear tu contraseña en TocadApp. Haz clic en el botón para crear una nueva contraseña.</p>
+        <p style="text-align: center; margin: 32px 0;">
+          <a href="${resetLink}" style="background: #7e22ce; color: #fff; padding: 14px 32px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Resetear contraseña</a>
+        </p>
+        <p style="color: #71717a; font-size: 13px;">Este enlace expira en <strong style="color: #a1a1aa;">1 hora</strong>. Si no solicitaste esto, puedes ignorar este correo.</p>
+        <hr style="border-color: #27272a; margin: 24px 0;" />
+        <p style="color: #52525b; font-size: 12px; margin: 0;">TocadApp · La app para músicos</p>
+      </div>
+    `;
+
+    await apiInstance.sendTransacEmail(sendSmtpEmail);
+
+    return res.json({ message: SUCCESS_MSG });
+  } catch (error: any) {
+    console.error("Error en forgotPassword:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const resetPassword = async (req: Request, res: Response) => {
+  const { token, password } = req.body;
+
+  if (!token || !password) {
+    return res.status(400).json({ error: "Token y nueva contraseña son obligatorios" });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token = $1",
+      [token]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(400).json({ error: "El enlace no es válido" });
+    }
+
+    const resetToken = result.rows[0];
+
+    if (resetToken.used) {
+      return res.status(400).json({ error: "Este enlace ya fue utilizado" });
+    }
+
+    if (new Date() > new Date(resetToken.expires_at)) {
+      return res.status(400).json({ error: "El enlace ha expirado. Solicita uno nuevo" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await pool.query("UPDATE users SET password = $1 WHERE id = $2", [
+      hashedPassword,
+      resetToken.user_id,
+    ]);
+
+    await pool.query(
+      "UPDATE password_reset_tokens SET used = true WHERE id = $1",
+      [resetToken.id]
+    );
+
+    return res.json({ message: "Contraseña actualizada correctamente" });
+  } catch (error: any) {
+    console.error("Error en resetPassword:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
   }
 };
 
