@@ -8,8 +8,13 @@ import {
   setCollected,
   setAttending,
 } from "../controllers/gigs.controller";
+import { authMiddleware } from "../middleware/auth";
+import { requireActiveSubscription } from "../middleware/requireActiveSubscription";
 
 const router = Router();
+
+router.use(authMiddleware);
+router.use(requireActiveSubscription);
 
 router.get("/", getGigs);
 router.post("/", createGig);
