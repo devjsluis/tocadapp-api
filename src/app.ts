@@ -9,6 +9,7 @@ import bandsRoutes from "./routes/bands.routes";
 import expensesRoutes from "./routes/expenses.routes";
 import subscriptionsRoutes from "./routes/subscriptions.routes";
 import { authMiddleware } from "./middleware/auth";
+import adminSubscriptionsRoutes from "./routes/adminSubscriptions.routes";
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use("/musicians", authMiddleware, musiciansRoutes);
 app.use("/expenses", authMiddleware, expensesRoutes);
 app.use("/users", usersRoutes);
 app.use("/subscriptions", subscriptionsRoutes);
+app.use("/admin/subscriptions", adminSubscriptionsRoutes);
 app.use("/bands", bandsRoutes);
 
 export default app;
