@@ -1,8 +1,10 @@
 import type { Request, Response } from "express";
 import {
+  deleteSubscriptionPayment,
   getAdminSubscriptions,
   getSubscriptionPaymentsByUserId,
   grantManualAccess,
+  updateSubscriptionPayment,
 } from "../services/adminSubscriptions.service";
 
 const getErrorResponse = (error: unknown) => {
@@ -61,15 +63,6 @@ const getErrorResponse = (error: unknown) => {
         },
       };
 
-    case "ACCESS_UNTIL_MUST_BE_FUTURE":
-      return {
-        status: 400,
-        body: {
-          error: "La fecha final debe estar en el futuro",
-          code: "ACCESS_UNTIL_MUST_BE_FUTURE",
-        },
-      };
-
     case "INVALID_MONTHS":
       return {
         status: 400,
@@ -77,6 +70,42 @@ const getErrorResponse = (error: unknown) => {
           error:
             "Debes enviar months como un entero entre 1 y 120, o enviar accessUntil",
           code: "INVALID_MONTHS",
+        },
+      };
+
+    case "PAYMENT_NOT_FOUND":
+      return {
+        status: 404,
+        body: {
+          error: "Pago no encontrado",
+          code: "PAYMENT_NOT_FOUND",
+        },
+      };
+
+    case "INVALID_PAID_AT":
+      return {
+        status: 400,
+        body: {
+          error: "La fecha del pago no es válida",
+          code: "INVALID_PAID_AT",
+        },
+      };
+
+    case "INVALID_ACCESS_PERIOD":
+      return {
+        status: 400,
+        body: {
+          error: "El periodo de acceso no es válido",
+          code: "INVALID_ACCESS_PERIOD",
+        },
+      };
+
+    case "ACCESS_UNTIL_BEFORE_ACCESS_FROM":
+      return {
+        status: 400,
+        body: {
+          error: "La fecha final no puede ser anterior a la fecha inicial",
+          code: "ACCESS_UNTIL_BEFORE_ACCESS_FROM",
         },
       };
 
@@ -210,6 +239,95 @@ export const listUserSubscriptionPayments = async (
     const result = await getSubscriptionPaymentsByUserId(userId);
 
     return res.json(result);
+  } catch (error) {
+    const response = getErrorResponse(error);
+
+    return res.status(response.status).json(response.body);
+  }
+};
+
+export const editSubscriptionPayment = async (req: Request, res: Response) => {
+  try {
+    const paymentId = Number(req.params.paymentId);
+
+    if (!Number.isInteger(paymentId) || paymentId <= 0) {
+      return res.status(400).json({
+        error: "El identificador del pago no es válido",
+        code: "INVALID_PAYMENT_ID",
+      });
+    }
+
+    const {
+      amount,
+      currency,
+      paidAt,
+      accessFrom,
+      accessUntil,
+      reference,
+      notes,
+    } = req.body;
+
+    if (!Number.isInteger(amount) || amount < 0) {
+      return res.status(400).json({
+        error: "amount debe enviarse en centavos",
+        code: "INVALID_AMOUNT",
+      });
+    }
+
+    if (
+      typeof paidAt !== "string" ||
+      typeof accessFrom !== "string" ||
+      typeof accessUntil !== "string"
+    ) {
+      return res.status(400).json({
+        error: "paidAt, accessFrom y accessUntil son obligatorios",
+        code: "PAYMENT_DATES_REQUIRED",
+      });
+    }
+
+    const payment = await updateSubscriptionPayment({
+      paymentId,
+      amount,
+      currency: typeof currency === "string" ? currency : undefined,
+      paidAt,
+      accessFrom,
+      accessUntil,
+      reference:
+        typeof reference === "string" ? reference.trim() || null : null,
+      notes: typeof notes === "string" ? notes.trim() || null : null,
+    });
+
+    return res.json({
+      message: "Pago actualizado correctamente",
+      payment,
+    });
+  } catch (error) {
+    const response = getErrorResponse(error);
+
+    return res.status(response.status).json(response.body);
+  }
+};
+
+export const removeSubscriptionPayment = async (
+  req: Request,
+  res: Response,
+) => {
+  try {
+    const paymentId = Number(req.params.paymentId);
+
+    if (!Number.isInteger(paymentId) || paymentId <= 0) {
+      return res.status(400).json({
+        error: "El identificador del pago no es válido",
+        code: "INVALID_PAYMENT_ID",
+      });
+    }
+
+    const payment = await deleteSubscriptionPayment(paymentId);
+
+    return res.json({
+      message: "Pago eliminado correctamente",
+      payment,
+    });
   } catch (error) {
     const response = getErrorResponse(error);
 

@@ -1,5 +1,24 @@
 import { pool } from "../lib/db";
 
+type UpdateSubscriptionPaymentInput = {
+  paymentId: number;
+  amount: number;
+  currency?: string;
+  paidAt: string;
+  accessFrom: string;
+  accessUntil: string;
+  reference?: string | null;
+  notes?: string | null;
+};
+
+type PaymentPeriodRow = {
+  id: number;
+  subscription_id: number;
+  user_id: number;
+  access_from: Date;
+  access_until: Date;
+};
+
 type GrantManualAccessInput = {
   userId: number;
   planCode: string;
@@ -51,6 +70,201 @@ const addUtcMonths = (date: Date, months: number): Date => {
   result.setUTCDate(Math.min(originalDay, lastDayOfTargetMonth));
 
   return result;
+};
+
+const synchronizeSubscriptionFromPayments = async (
+  client: {
+    query: (
+      text: string,
+      params?: unknown[],
+    ) => Promise<{
+      rows: PaymentPeriodRow[];
+      rowCount: number | null;
+    }>;
+  },
+  subscriptionId: number,
+) => {
+  const latestPaymentResult = await client.query(
+    `
+      SELECT
+        id,
+        subscription_id,
+        user_id,
+        access_from,
+        access_until
+      FROM subscription_payments
+      WHERE subscription_id = $1
+      ORDER BY access_until DESC, id DESC
+      LIMIT 1
+    `,
+    [subscriptionId],
+  );
+
+  const latestPayment = latestPaymentResult.rows[0];
+
+  if (!latestPayment) {
+    await client.query(
+      `
+        UPDATE subscriptions
+        SET
+          status = 'EXPIRED',
+          current_period_end = NOW(),
+          ended_at = NOW(),
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      [subscriptionId],
+    );
+
+    return;
+  }
+
+  const now = new Date();
+  const accessUntil = new Date(latestPayment.access_until);
+  const isActive = accessUntil > now;
+
+  await client.query(
+    `
+      UPDATE subscriptions
+      SET
+        status = $1,
+        current_period_start = $2,
+        current_period_end = $3,
+        ended_at = $4,
+        updated_at = NOW()
+      WHERE id = $5
+    `,
+    [
+      isActive ? "ACTIVE" : "EXPIRED",
+      latestPayment.access_from,
+      latestPayment.access_until,
+      isActive ? null : now.toISOString(),
+      subscriptionId,
+    ],
+  );
+};
+
+export const updateSubscriptionPayment = async ({
+  paymentId,
+  amount,
+  currency = "MXN",
+  paidAt,
+  accessFrom,
+  accessUntil,
+  reference = null,
+  notes = null,
+}: UpdateSubscriptionPaymentInput) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    if (!Number.isInteger(amount) || amount < 0) {
+      throw new Error("INVALID_AMOUNT");
+    }
+
+    const normalizedCurrency = currency.trim().toUpperCase();
+
+    if (!/^[A-Z]{3}$/.test(normalizedCurrency)) {
+      throw new Error("INVALID_CURRENCY");
+    }
+
+    const parsedPaidAt = new Date(paidAt);
+    const parsedAccessFrom = new Date(accessFrom);
+    const parsedAccessUntil = new Date(accessUntil);
+
+    if (Number.isNaN(parsedPaidAt.getTime())) {
+      throw new Error("INVALID_PAID_AT");
+    }
+
+    if (
+      Number.isNaN(parsedAccessFrom.getTime()) ||
+      Number.isNaN(parsedAccessUntil.getTime())
+    ) {
+      throw new Error("INVALID_ACCESS_PERIOD");
+    }
+
+    if (parsedAccessUntil < parsedAccessFrom) {
+      throw new Error("ACCESS_UNTIL_BEFORE_ACCESS_FROM");
+    }
+
+    const paymentResult = await client.query(
+      `
+        UPDATE subscription_payments
+        SET
+          amount = $1,
+          currency = $2,
+          paid_at = $3,
+          access_from = $4,
+          access_until = $5,
+          reference = $6,
+          notes = $7
+        WHERE id = $8
+        RETURNING *
+      `,
+      [
+        amount,
+        normalizedCurrency,
+        parsedPaidAt.toISOString(),
+        parsedAccessFrom.toISOString(),
+        parsedAccessUntil.toISOString(),
+        reference,
+        notes,
+        paymentId,
+      ],
+    );
+
+    if (paymentResult.rowCount === 0) {
+      throw new Error("PAYMENT_NOT_FOUND");
+    }
+
+    const payment = paymentResult.rows[0];
+
+    await synchronizeSubscriptionFromPayments(client, payment.subscription_id);
+
+    await client.query("COMMIT");
+
+    return payment;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+export const deleteSubscriptionPayment = async (paymentId: number) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const paymentResult = await client.query(
+      `
+        DELETE FROM subscription_payments
+        WHERE id = $1
+        RETURNING *
+      `,
+      [paymentId],
+    );
+
+    if (paymentResult.rowCount === 0) {
+      throw new Error("PAYMENT_NOT_FOUND");
+    }
+
+    const payment = paymentResult.rows[0];
+
+    await synchronizeSubscriptionFromPayments(client, payment.subscription_id);
+
+    await client.query("COMMIT");
+
+    return payment;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 export const grantManualAccess = async ({
@@ -133,6 +347,7 @@ export const grantManualAccess = async ({
 
     let accessFrom: Date;
     let calculatedAccessUntil: Date;
+    let subscriptionStatus: "ACTIVE" | "EXPIRED";
 
     if (accessUntil) {
       calculatedAccessUntil = new Date(accessUntil);
@@ -142,10 +357,11 @@ export const grantManualAccess = async ({
       }
 
       if (calculatedAccessUntil <= now) {
-        throw new Error("ACCESS_UNTIL_MUST_BE_FUTURE");
+        accessFrom = new Date(calculatedAccessUntil);
+        accessFrom.setMinutes(accessFrom.getMinutes() - 1);
+      } else {
+        accessFrom = now;
       }
-
-      accessFrom = now;
     } else {
       if (
         months === undefined ||
@@ -170,7 +386,15 @@ export const grantManualAccess = async ({
       calculatedAccessUntil = addUtcMonths(accessFrom, months);
     }
 
+    subscriptionStatus = calculatedAccessUntil > now ? "ACTIVE" : "EXPIRED";
+
     const plan = planResult.rows[0];
+
+    console.log({
+      accessFrom: accessFrom.toISOString(),
+      accessUntil: calculatedAccessUntil.toISOString(),
+      subscriptionStatus,
+    });
 
     let subscription: SubscriptionRow;
 
@@ -196,24 +420,28 @@ export const grantManualAccess = async ({
             VALUES (
               $1,
               $2,
-              'ACTIVE',
+              $3,
               'MANUAL',
               NULL,
               NULL,
-              $3,
               $4,
-              NOW(),
               $5,
+              NOW(),
               $6,
+              $7,
               FALSE,
               NULL,
-              NULL
+              CASE
+                WHEN $3::varchar = 'EXPIRED'::varchar THEN NOW()
+                ELSE NULL
+              END
             )
             RETURNING *
           `,
         [
           userId,
           plan.id,
+          subscriptionStatus,
           plan.price_amount,
           plan.currency,
           accessFrom.toISOString(),
@@ -227,23 +455,27 @@ export const grantManualAccess = async ({
         `
             UPDATE subscriptions
             SET
-              plan_id = $1,
-              status = 'ACTIVE',
+              plan_id = $2,
+              status = $1,
               provider = 'MANUAL',
               provider_customer_id = NULL,
               provider_subscription_id = NULL,
-              price_amount = $2,
-              currency = $3,
-              current_period_start = $4,
-              current_period_end = $5,
+              price_amount = $3,
+              currency = $4,
+              current_period_start = $5,
+              current_period_end = $6,
               cancel_at_period_end = FALSE,
               canceled_at = NULL,
-              ended_at = NULL,
+              ended_at = CASE
+                WHEN $1::varchar = 'EXPIRED'::varchar THEN NOW()
+                ELSE NULL
+              END,
               updated_at = NOW()
-            WHERE id = $6
+            WHERE id = $7
             RETURNING *
           `,
         [
+          subscriptionStatus,
           plan.id,
           plan.price_amount,
           plan.currency,
