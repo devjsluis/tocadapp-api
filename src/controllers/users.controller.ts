@@ -7,39 +7,134 @@ import axios from "axios";
 import { AuthRequest } from "../middleware/auth";
 
 export const createUser = async (req: Request, res: Response) => {
-  const { email, name, lastName, password, role } = req.body;
+  const { email, name, lastName, password } = req.body;
 
-  if (!email || !name || !lastName || !password || !role) {
+  if (!email || !name || !lastName || !password) {
     return res.status(400).json({
       error:
-        "Todos los campos (nombre, apellido, correo, contraseña y rol) son obligatorios",
+        "Todos los campos (nombre, apellido, correo y contraseña) son obligatorios",
     });
   }
 
+  if (password.length < 6) {
+    return res.status(400).json({
+      error: "La contraseña debe tener al menos 6 caracteres",
+    });
+  }
+
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const normalizedName = String(name).trim();
+  const normalizedLastName = String(lastName).trim();
+
+  const client = await pool.connect();
+
   try {
-    const existingUser = await pool.query(
-      "SELECT email FROM users WHERE email = $1",
-      [email],
+    await client.query("BEGIN");
+
+    const existingUser = await client.query(
+      "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+      [normalizedEmail],
     );
 
-    if (existingUser.rowCount! > 0) {
+    if ((existingUser.rowCount ?? 0) > 0) {
+      await client.query("ROLLBACK");
+
       return res.status(400).json({
         error: "Este correo electrónico ya está registrado",
       });
     }
 
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    const result = await pool.query(
-      "INSERT INTO users (email, name, last_name, password, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, name, last_name, role, created_at",
-      [email, name, lastName, hashedPassword, role],
+    const planResult = await client.query(
+      `
+        SELECT id, price_amount, currency
+        FROM plans
+        WHERE code = 'TOCADAPP_MONTHLY'
+          AND active = TRUE
+        LIMIT 1
+      `,
     );
 
-    return res.status(201).json(result.rows[0]);
-  } catch (error: any) {
-    console.error("Error en BD:", error);
-    return res.status(500).json({ error: "Error interno del servidor" });
+    if (planResult.rowCount === 0) {
+      throw new Error("TRIAL_PLAN_NOT_FOUND");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const userResult = await client.query(
+      `
+        INSERT INTO users (
+          email,
+          name,
+          last_name,
+          password,
+          role
+        )
+        VALUES ($1, $2, $3, $4, 'USER')
+        RETURNING id, email, name, last_name, role, created_at
+      `,
+      [normalizedEmail, normalizedName, normalizedLastName, hashedPassword],
+    );
+
+    const user = userResult.rows[0];
+    const plan = planResult.rows[0];
+
+    const subscriptionResult = await client.query(
+      `
+        INSERT INTO subscriptions (
+          user_id,
+          plan_id,
+          status,
+          provider,
+          price_amount,
+          currency,
+          started_at,
+          current_period_start,
+          current_period_end
+        )
+        VALUES (
+          $1,
+          $2,
+          'ACTIVE',
+          'TRIAL',
+          $3,
+          $4,
+          NOW(),
+          NOW(),
+          NOW() + INTERVAL '7 days'
+        )
+        RETURNING
+          id,
+          status,
+          provider,
+          current_period_start,
+          current_period_end
+      `,
+      [user.id, plan.id, plan.price_amount, plan.currency],
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({
+      user,
+      subscription: subscriptionResult.rows[0],
+      message: "Cuenta creada con 7 días de prueba gratuita",
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    console.error("Error al crear usuario:", error);
+
+    if (error instanceof Error && error.message === "TRIAL_PLAN_NOT_FOUND") {
+      return res.status(500).json({
+        error: "No se encontró el plan necesario para iniciar la prueba",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
+  } finally {
+    client.release();
   }
 };
 
@@ -104,7 +199,9 @@ export const updateMe = async (req: AuthRequest, res: Response) => {
   const { name, last_name } = req.body;
 
   if (!name || !last_name) {
-    return res.status(400).json({ error: "Nombre y apellido son obligatorios" });
+    return res
+      .status(400)
+      .json({ error: "Nombre y apellido son obligatorios" });
   }
 
   try {
@@ -125,12 +222,13 @@ export const forgotPassword = async (req: Request, res: Response) => {
     return res.status(400).json({ error: "El correo es obligatorio" });
   }
 
-  const SUCCESS_MSG = "Si el correo está registrado, recibirás un enlace en breve";
+  const SUCCESS_MSG =
+    "Si el correo está registrado, recibirás un enlace en breve";
 
   try {
     const result = await pool.query(
       "SELECT id, name FROM users WHERE email = $1",
-      [email]
+      [email],
     );
 
     if (result.rowCount === 0) {
@@ -143,12 +241,12 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
     await pool.query(
       "UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false",
-      [user.id]
+      [user.id],
     );
 
     await pool.query(
       "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [user.id, token, expiresAt]
+      [user.id, token, expiresAt],
     );
 
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -179,7 +277,7 @@ export const forgotPassword = async (req: Request, res: Response) => {
           "api-key": process.env.BREVO_API_KEY,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     return res.json({ message: SUCCESS_MSG });
@@ -193,17 +291,21 @@ export const resetPassword = async (req: Request, res: Response) => {
   const { token, password } = req.body;
 
   if (!token || !password) {
-    return res.status(400).json({ error: "Token y nueva contraseña son obligatorios" });
+    return res
+      .status(400)
+      .json({ error: "Token y nueva contraseña son obligatorios" });
   }
 
   if (password.length < 6) {
-    return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+    return res
+      .status(400)
+      .json({ error: "La contraseña debe tener al menos 6 caracteres" });
   }
 
   try {
     const result = await pool.query(
       "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token = $1",
-      [token]
+      [token],
     );
 
     if (result.rowCount === 0) {
@@ -217,7 +319,9 @@ export const resetPassword = async (req: Request, res: Response) => {
     }
 
     if (new Date() > new Date(resetToken.expires_at)) {
-      return res.status(400).json({ error: "El enlace ha expirado. Solicita uno nuevo" });
+      return res
+        .status(400)
+        .json({ error: "El enlace ha expirado. Solicita uno nuevo" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -229,7 +333,7 @@ export const resetPassword = async (req: Request, res: Response) => {
 
     await pool.query(
       "UPDATE password_reset_tokens SET used = true WHERE id = $1",
-      [resetToken.id]
+      [resetToken.id],
     );
 
     return res.json({ message: "Contraseña actualizada correctamente" });
