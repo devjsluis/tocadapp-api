@@ -16,7 +16,7 @@ export const createUser = async (req: Request, res: Response) => {
     });
   }
 
-  if (password.length < 6) {
+  if (typeof password !== "string" || password.length < 6) {
     return res.status(400).json({
       error: "La contraseña debe tener al menos 6 caracteres",
     });
@@ -26,13 +26,24 @@ export const createUser = async (req: Request, res: Response) => {
   const normalizedName = String(name).trim();
   const normalizedLastName = String(lastName).trim();
 
+  if (!normalizedEmail || !normalizedName || !normalizedLastName) {
+    return res.status(400).json({
+      error: "Nombre, apellido y correo no pueden estar vacíos",
+    });
+  }
+
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
     const existingUser = await client.query(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+      `
+        SELECT id
+        FROM users
+        WHERE LOWER(email) = LOWER($1)
+        LIMIT 1
+      `,
       [normalizedEmail],
     );
 
@@ -69,8 +80,14 @@ export const createUser = async (req: Request, res: Response) => {
           password,
           role
         )
-        VALUES ($1, $2, $3, $4, 'USER')
-        RETURNING id, email, name, last_name, role, created_at
+        VALUES ($1, $2, $3, $4, 'musician')
+        RETURNING
+          id,
+          email,
+          name,
+          last_name,
+          role,
+          created_at
       `,
       [normalizedEmail, normalizedName, normalizedLastName, hashedPassword],
     );
@@ -89,7 +106,8 @@ export const createUser = async (req: Request, res: Response) => {
           currency,
           started_at,
           current_period_start,
-          current_period_end
+          current_period_end,
+          cancel_at_period_end
         )
         VALUES (
           $1,
@@ -100,7 +118,8 @@ export const createUser = async (req: Request, res: Response) => {
           $4,
           NOW(),
           NOW(),
-          NOW() + INTERVAL '7 days'
+          NOW() + INTERVAL '7 days',
+          FALSE
         )
         RETURNING
           id,
@@ -119,7 +138,7 @@ export const createUser = async (req: Request, res: Response) => {
       subscription: subscriptionResult.rows[0],
       message: "Cuenta creada con 7 días de prueba gratuita",
     });
-  } catch (error) {
+  } catch (error: unknown) {
     await client.query("ROLLBACK");
 
     console.error("Error al crear usuario:", error);
@@ -127,6 +146,14 @@ export const createUser = async (req: Request, res: Response) => {
     if (error instanceof Error && error.message === "TRIAL_PLAN_NOT_FOUND") {
       return res.status(500).json({
         error: "No se encontró el plan necesario para iniciar la prueba",
+      });
+    }
+
+    const databaseError = error as { code?: string };
+
+    if (databaseError.code === "23505") {
+      return res.status(400).json({
+        error: "Este correo electrónico ya está registrado",
       });
     }
 
