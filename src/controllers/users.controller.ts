@@ -5,6 +5,10 @@ import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
 import axios from "axios";
 import { AuthRequest } from "../middleware/auth";
+import {
+  createEmailVerificationToken,
+  sendEmailVerification,
+} from "../services/emailVerification.service";
 
 export const createUser = async (req: Request, res: Response) => {
   const { email, name, lastName, password } = req.body;
@@ -78,9 +82,10 @@ export const createUser = async (req: Request, res: Response) => {
           name,
           last_name,
           password,
-          role
+          role,
+          email_verified_at
         )
-        VALUES ($1, $2, $3, $4, 'musician')
+        VALUES ($1, $2, $3, $4, 'musician', NULL)
         RETURNING
           id,
           email,
@@ -93,6 +98,10 @@ export const createUser = async (req: Request, res: Response) => {
     );
 
     const user = userResult.rows[0];
+    const verificationToken = await createEmailVerificationToken(
+      client,
+      user.id,
+    );
     const plan = planResult.rows[0];
 
     const subscriptionResult = await client.query(
@@ -133,10 +142,27 @@ export const createUser = async (req: Request, res: Response) => {
 
     await client.query("COMMIT");
 
+    let emailSent = false;
+
+    try {
+      await sendEmailVerification(user.email, user.name, verificationToken);
+
+      emailSent = true;
+    } catch (emailError) {
+      console.error(
+        "La cuenta se creó, pero no se envió la verificación:",
+        emailError,
+      );
+    }
+
     return res.status(201).json({
       user,
       subscription: subscriptionResult.rows[0],
-      message: "Cuenta creada con 7 días de prueba gratuita",
+      requiresEmailVerification: true,
+      emailSent,
+      message: emailSent
+        ? "Cuenta creada. Revisa tu correo para confirmar tu dirección."
+        : "Cuenta creada, pero no fue posible enviar el correo de verificación.",
     });
   } catch (error: unknown) {
     await client.query("ROLLBACK");
@@ -180,8 +206,19 @@ export const loginUser = async (req: Request, res: Response) => {
     const user = result.rows[0];
 
     const validPassword = await bcrypt.compare(password, user.password);
+
     if (!validPassword) {
-      return res.status(401).json({ error: "Contraseña incorrecta" });
+      return res.status(401).json({
+        error: "Contraseña incorrecta",
+      });
+    }
+
+    if (!user.email_verified_at) {
+      return res.status(403).json({
+        error: "Debes confirmar tu correo antes de iniciar sesión",
+        code: "EMAIL_NOT_VERIFIED",
+        email: user.email,
+      });
     }
 
     const token = jwt.sign(
@@ -209,7 +246,18 @@ export const getMe = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
   try {
     const result = await pool.query(
-      "SELECT id, email, name, last_name, role, created_at FROM users WHERE id = $1",
+      `
+    SELECT
+      id,
+      email,
+      name,
+      last_name,
+      role,
+      email_verified_at,
+      created_at
+    FROM users
+    WHERE id = $1
+  `,
       [userId],
     );
     if (result.rowCount === 0) {
