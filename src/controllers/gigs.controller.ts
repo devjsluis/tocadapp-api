@@ -36,24 +36,49 @@ export const createGig = async (req: AuthRequest, res: Response) => {
   const { title, place, date, time, amount, hours, notes, band_id } = req.body;
   const userId = req.user!.id;
 
-  if (band_id) {
+  const parsedHours = Number(hours);
+
+  if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+    return res.status(400).json({
+      error: "La duración debe ser un número mayor a 0",
+    });
+  }
+
+  const normalizedBandId =
+    band_id === "" || band_id === null || band_id === undefined
+      ? null
+      : Number(band_id);
+
+  if (normalizedBandId !== null) {
     const bandCheck = await pool.query(
       `SELECT b.id FROM bands b
        LEFT JOIN band_members bm ON bm.band_id = b.id AND bm.user_id = $2
        WHERE b.id = $1 AND (b.owner_id = $2 OR bm.can_create_gigs = TRUE)`,
-      [band_id, userId],
+      [normalizedBandId, userId],
     );
+
     if (bandCheck.rowCount === 0) {
-      return res
-        .status(403)
-        .json({ error: "No tienes permiso para agregar tocadas a esta banda" });
+      return res.status(403).json({
+        error: "No tienes permiso para agregar tocadas a esta banda",
+      });
     }
   }
 
   const sql = `
-    INSERT INTO gigs (title, place, date, time, amount, hours, notes, user_id, band_id)
+    INSERT INTO gigs (
+      title,
+      place,
+      date,
+      time,
+      amount,
+      hours,
+      notes,
+      user_id,
+      band_id
+    )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    RETURNING *`;
+    RETURNING *
+  `;
 
   try {
     const result = await pool.query(sql, [
@@ -62,14 +87,19 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       date,
       time,
       amount || null,
-      hours,
-      notes || null,
+      parsedHours,
+      notes?.trim() || null,
       userId,
-      band_id || null,
+      normalizedBandId,
     ]);
+
     return res.status(201).json(result.rows[0]);
   } catch (error: any) {
-    return res.status(500).json({ error: error.message });
+    console.error("Error al crear tocada:", error);
+
+    return res.status(500).json({
+      error: error.message,
+    });
   }
 };
 
@@ -78,13 +108,44 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   const { title, place, date, time, amount, hours, notes, band_id } = req.body;
   const userId = req.user!.id;
 
+  const parsedHours = Number(hours);
+
+  if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+    return res.status(400).json({
+      error: "La duración debe ser un número mayor a 0",
+    });
+  }
+
+  const normalizedBandId =
+    band_id === "" || band_id === null || band_id === undefined
+      ? null
+      : Number(band_id);
+
   const sql = `
     UPDATE gigs
-    SET title=$1, place=$2, date=$3, time=$4, amount=$5, hours=$6, notes=$7, band_id=$8
-    WHERE id=$9
-      AND (user_id=$10
-           OR (band_id IS NOT NULL AND band_id IN (SELECT id FROM bands WHERE owner_id = $10)))
-    RETURNING *`;
+    SET
+      title = $1,
+      place = $2,
+      date = $3,
+      time = $4,
+      amount = $5,
+      hours = $6,
+      notes = $7,
+      band_id = $8
+    WHERE id = $9
+      AND (
+        user_id = $10
+        OR (
+          band_id IS NOT NULL
+          AND band_id IN (
+            SELECT id
+            FROM bands
+            WHERE owner_id = $10
+          )
+        )
+      )
+    RETURNING *
+  `;
 
   try {
     const result = await pool.query(sql, [
@@ -93,20 +154,26 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
       date,
       time,
       amount || null,
-      hours,
-      notes || null,
-      band_id || null,
+      parsedHours,
+      notes?.trim() || null,
+      normalizedBandId,
       id,
       userId,
     ]);
+
     if (result.rowCount === 0) {
-      return res
-        .status(404)
-        .json({ error: "Tocada no encontrada o no autorizado" });
+      return res.status(404).json({
+        error: "Tocada no encontrada o no autorizado",
+      });
     }
+
     return res.json(result.rows[0]);
   } catch (error: any) {
-    return res.status(500).json({ error: error.message });
+    console.error("Error al actualizar tocada:", error);
+
+    return res.status(500).json({
+      error: error.message,
+    });
   }
 };
 
@@ -126,7 +193,9 @@ export const setMyEarnings = async (req: AuthRequest, res: Response) => {
       [id, userId],
     );
     if (gigCheck.rowCount === 0) {
-      return res.status(404).json({ error: "Gig no encontrada o no autorizado" });
+      return res
+        .status(404)
+        .json({ error: "Gig no encontrada o no autorizado" });
     }
 
     const result = await pool.query(
@@ -156,7 +225,9 @@ export const setCollected = async (req: AuthRequest, res: Response) => {
       [amount ?? null, id, userId],
     );
     if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Tocada no encontrada o no autorizado" });
+      return res
+        .status(404)
+        .json({ error: "Tocada no encontrada o no autorizado" });
     }
     return res.json({ ok: true, data: result.rows[0] });
   } catch (error: any) {
@@ -180,7 +251,9 @@ export const setAttending = async (req: AuthRequest, res: Response) => {
       [id, userId],
     );
     if (gigCheck.rowCount === 0) {
-      return res.status(404).json({ error: "Gig no encontrada o no autorizado" });
+      return res
+        .status(404)
+        .json({ error: "Gig no encontrada o no autorizado" });
     }
 
     if (attending === null || attending === undefined) {
