@@ -33,10 +33,61 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
 };
 
 export const createGig = async (req: AuthRequest, res: Response) => {
-  const { title, place, date, time, amount, hours, notes, band_id } = req.body;
+  const {
+    title,
+    place,
+    date,
+    time,
+    amount,
+    hours,
+    notes,
+    band_id,
+    location_address,
+    latitude,
+    longitude,
+    google_place_id,
+  } = req.body;
+
   const userId = req.user!.id;
 
   const parsedHours = Number(hours);
+
+  const hasLatitude =
+    latitude !== null && latitude !== undefined && latitude !== "";
+
+  const hasLongitude =
+    longitude !== null && longitude !== undefined && longitude !== "";
+
+  if (hasLatitude !== hasLongitude) {
+    return res.status(400).json({
+      error: "La latitud y longitud deben enviarse juntas",
+    });
+  }
+
+  const parsedLatitude = hasLatitude ? Number(latitude) : null;
+  const parsedLongitude = hasLongitude ? Number(longitude) : null;
+
+  if (
+    parsedLatitude !== null &&
+    (!Number.isFinite(parsedLatitude) ||
+      parsedLatitude < -90 ||
+      parsedLatitude > 90)
+  ) {
+    return res.status(400).json({
+      error: "La latitud no es válida",
+    });
+  }
+
+  if (
+    parsedLongitude !== null &&
+    (!Number.isFinite(parsedLongitude) ||
+      parsedLongitude < -180 ||
+      parsedLongitude > 180)
+  ) {
+    return res.status(400).json({
+      error: "La longitud no es válida",
+    });
+  }
 
   if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
     return res.status(400).json({
@@ -74,9 +125,16 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       hours,
       notes,
       user_id,
-      band_id
+      band_id,
+      location_address,
+      latitude,
+      longitude,
+      google_place_id
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    VALUES (
+      $1, $2, $3, $4, $5, $6, $7,
+      $8, $9, $10, $11, $12, $13
+    )
     RETURNING *
   `;
 
@@ -86,11 +144,15 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       place,
       date,
       time,
-      amount || null,
+      amount ?? null,
       parsedHours,
       notes?.trim() || null,
       userId,
       normalizedBandId,
+      location_address?.trim() || null,
+      parsedLatitude,
+      parsedLongitude,
+      google_place_id?.trim() || null,
     ]);
 
     return res.status(201).json(result.rows[0]);
@@ -105,10 +167,60 @@ export const createGig = async (req: AuthRequest, res: Response) => {
 
 export const updateGig = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
-  const { title, place, date, time, amount, hours, notes, band_id } = req.body;
+  const {
+    title,
+    place,
+    date,
+    time,
+    amount,
+    hours,
+    notes,
+    band_id,
+    location_address,
+    latitude,
+    longitude,
+    google_place_id,
+  } = req.body;
   const userId = req.user!.id;
 
   const parsedHours = Number(hours);
+
+  const hasLatitude =
+    latitude !== null && latitude !== undefined && latitude !== "";
+
+  const hasLongitude =
+    longitude !== null && longitude !== undefined && longitude !== "";
+
+  if (hasLatitude !== hasLongitude) {
+    return res.status(400).json({
+      error: "La latitud y longitud deben enviarse juntas",
+    });
+  }
+
+  const parsedLatitude = hasLatitude ? Number(latitude) : null;
+  const parsedLongitude = hasLongitude ? Number(longitude) : null;
+
+  if (
+    parsedLatitude !== null &&
+    (!Number.isFinite(parsedLatitude) ||
+      parsedLatitude < -90 ||
+      parsedLatitude > 90)
+  ) {
+    return res.status(400).json({
+      error: "La latitud no es válida",
+    });
+  }
+
+  if (
+    parsedLongitude !== null &&
+    (!Number.isFinite(parsedLongitude) ||
+      parsedLongitude < -180 ||
+      parsedLongitude > 180)
+  ) {
+    return res.status(400).json({
+      error: "La longitud no es válida",
+    });
+  }
 
   if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
     return res.status(400).json({
@@ -122,30 +234,34 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
       : Number(band_id);
 
   const sql = `
-    UPDATE gigs
-    SET
-      title = $1,
-      place = $2,
-      date = $3,
-      time = $4,
-      amount = $5,
-      hours = $6,
-      notes = $7,
-      band_id = $8
-    WHERE id = $9
-      AND (
-        user_id = $10
-        OR (
-          band_id IS NOT NULL
-          AND band_id IN (
-            SELECT id
-            FROM bands
-            WHERE owner_id = $10
-          )
+  UPDATE gigs
+  SET
+    title = $1,
+    place = $2,
+    date = $3,
+    time = $4,
+    amount = $5,
+    hours = $6,
+    notes = $7,
+    band_id = $8,
+    location_address = $9,
+    latitude = $10,
+    longitude = $11,
+    google_place_id = $12
+  WHERE id = $13
+    AND (
+      user_id = $14
+      OR (
+        band_id IS NOT NULL
+        AND band_id IN (
+          SELECT id
+          FROM bands
+          WHERE owner_id = $14
         )
       )
-    RETURNING *
-  `;
+    )
+  RETURNING *
+`;
 
   try {
     const result = await pool.query(sql, [
@@ -153,10 +269,14 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
       place,
       date,
       time,
-      amount || null,
+      amount ?? null,
       parsedHours,
       notes?.trim() || null,
       normalizedBandId,
+      location_address?.trim() || null,
+      parsedLatitude,
+      parsedLongitude,
+      google_place_id?.trim() || null,
       id,
       userId,
     ]);
