@@ -18,6 +18,7 @@ const allowedOrigins = [
   "https://www.tocadapp.com",
   "http://localhost:3000",
   "http://localhost:4000", // Swagger UI
+  "http://localhost:8081",
 ];
 
 app.use(
