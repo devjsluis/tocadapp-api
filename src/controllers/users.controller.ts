@@ -325,7 +325,15 @@ export const forgotPassword = async (req: Request, res: Response) => {
     );
 
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const resetLink = `${frontendUrl}/reset-password?token=${token}`;
+
+    const mobileAppUrl = process.env.MOBILE_APP_URL || "tocadapp://";
+
+    const resetTarget =
+      process.env.PASSWORD_RESET_TARGET === "mobile"
+        ? mobileAppUrl
+        : frontendUrl;
+
+    const resetLink = `${resetTarget.replace(/\/$/, "")}/reset-password?token=${token}`;
 
     await axios.post(
       "https://api.brevo.com/v3/smtp/email",
