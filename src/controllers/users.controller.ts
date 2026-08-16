@@ -221,14 +221,40 @@ export const loginUser = async (req: Request, res: Response) => {
       });
     }
 
+    const jwtSecret = process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO";
+
+    const jwtRefreshSecret =
+      process.env.JWT_REFRESH_SECRET || "TU_SECRETO_REFRESH_SUPER_SECRETO";
+
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO",
-      { expiresIn: "24h" },
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        type: "access",
+      },
+      jwtSecret,
+      {
+        expiresIn: "30m",
+      },
+    );
+
+    const refreshToken = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        type: "refresh",
+      },
+      jwtRefreshSecret,
+      {
+        expiresIn: "30d",
+      },
     );
 
     return res.json({
       token,
+      refreshToken,
       user: {
         id: user.id,
         name: user.name,
@@ -239,6 +265,86 @@ export const loginUser = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(error);
     return res.status(500).json({ error: "Error interno del servidor" });
+  }
+};
+
+export const refreshAccessToken = async (req: Request, res: Response) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(401).json({
+      error: "Refresh token requerido",
+    });
+  }
+
+  const jwtSecret = process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO";
+
+  const jwtRefreshSecret =
+    process.env.JWT_REFRESH_SECRET || "TU_SECRETO_REFRESH_SUPER_SECRETO";
+
+  try {
+    const decoded = jwt.verify(refreshToken, jwtRefreshSecret) as {
+      id: number;
+      email: string;
+      role: string;
+      type?: string;
+    };
+
+    if (decoded.type !== "refresh") {
+      return res.status(401).json({
+        error: "Refresh token inválido",
+      });
+    }
+
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          email,
+          role,
+          email_verified_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [decoded.id],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(401).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const user = result.rows[0];
+
+    if (!user.email_verified_at) {
+      return res.status(403).json({
+        error: "Correo no verificado",
+        code: "EMAIL_NOT_VERIFIED",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        type: "access",
+      },
+      jwtSecret,
+      {
+        expiresIn: "30m",
+      },
+    );
+
+    return res.json({
+      token,
+    });
+  } catch {
+    return res.status(401).json({
+      error: "Refresh token inválido o expirado",
+    });
   }
 };
 

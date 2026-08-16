@@ -7,6 +7,7 @@ import {
   updateMe,
   forgotPassword,
   resetPassword,
+  refreshAccessToken,
 } from "../controllers/users.controller";
 import { authMiddleware } from "../middleware/auth";
 import { requireAdmin } from "../middleware/requireAdmin";
@@ -22,6 +23,7 @@ router.put("/me", authMiddleware, updateMe);
 router.get("/", authMiddleware, requireAdmin, getUsers);
 router.post("/", createUser);
 router.post("/login", loginUser);
+router.post("/refresh", refreshAccessToken);
 router.post("/verify-email", verifyEmail);
 router.post("/resend-verification", resendEmailVerification);
 router.post("/forgot-password", forgotPassword);
