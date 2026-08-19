@@ -10,6 +10,7 @@ import expensesRoutes from "./routes/expenses.routes";
 import subscriptionsRoutes from "./routes/subscriptions.routes";
 import { authMiddleware } from "./middleware/auth";
 import adminSubscriptionsRoutes from "./routes/adminSubscriptions.routes";
+import financialMovementsRoutes from "./routes/financialMovements.routes";
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.get("/health", (_req, res) => {
 app.use("/gigs", authMiddleware, gigsRoutes);
 app.use("/musicians", authMiddleware, musiciansRoutes);
 app.use("/expenses", authMiddleware, expensesRoutes);
+app.use("/financial-movements", authMiddleware, financialMovementsRoutes);
 app.use("/users", usersRoutes);
 app.use("/subscriptions", subscriptionsRoutes);
 app.use("/admin/subscriptions", adminSubscriptionsRoutes);
