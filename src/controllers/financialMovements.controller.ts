@@ -41,6 +41,30 @@ async function userCanAccessGig(
   return (result.rowCount ?? 0) > 0;
 }
 
+async function userCanAccessBand(
+  userId: number,
+  bandId: number,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      SELECT b.id
+      FROM bands b
+      LEFT JOIN band_members bm
+        ON bm.band_id = b.id
+       AND bm.user_id = $2
+      WHERE b.id = $1
+        AND (
+          b.owner_id = $2
+          OR bm.user_id = $2
+        )
+      LIMIT 1
+    `,
+    [bandId, userId],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
 export const getFinancialMovements = async (
   req: AuthRequest,
   res: Response,
@@ -92,7 +116,7 @@ export const getFinancialMovements = async (
         LEFT JOIN gigs g
           ON g.id = fm.gig_id
         LEFT JOIN bands b
-          ON b.id = g.band_id
+          ON b.id = COALESCE(g.band_id, fm.band_id)
         WHERE ${conditions.join(" AND ")}
         ORDER BY
           fm.date DESC,
@@ -120,7 +144,8 @@ export const createFinancialMovement = async (
 ) => {
   const userId = req.user!.id;
 
-  const { type, amount, category, description, date, gig_id } = req.body;
+  const { type, amount, category, description, date, gig_id, band_id } =
+    req.body;
 
   const normalizedType = normalizeMovementType(type);
 
@@ -147,6 +172,27 @@ export const createFinancialMovement = async (
   }
 
   let normalizedGigId: number | null = null;
+  let normalizedBandId: number | null = null;
+
+  if (band_id !== null && band_id !== undefined && band_id !== "") {
+    const parsedBandId = Number(band_id);
+
+    if (!Number.isInteger(parsedBandId) || parsedBandId <= 0) {
+      return res.status(400).json({
+        error: "La banda indicada no es válida",
+      });
+    }
+
+    const canAccess = await userCanAccessBand(userId, parsedBandId);
+
+    if (!canAccess) {
+      return res.status(403).json({
+        error: "No tienes acceso a la banda seleccionada",
+      });
+    }
+
+    normalizedBandId = parsedBandId;
+  }
 
   if (gig_id !== null && gig_id !== undefined && gig_id !== "") {
     const parsedGigId = Number(gig_id);
@@ -168,6 +214,23 @@ export const createFinancialMovement = async (
     normalizedGigId = parsedGigId;
   }
 
+  if (normalizedGigId !== null) {
+    const gigResult = await pool.query(
+      `
+      SELECT band_id
+      FROM gigs
+      WHERE id = $1
+      LIMIT 1
+    `,
+      [normalizedGigId],
+    );
+
+    normalizedBandId =
+      gigResult.rows[0]?.band_id != null
+        ? Number(gigResult.rows[0].band_id)
+        : null;
+  }
+
   const normalizedDescription =
     typeof description === "string" && description.trim()
       ? description.trim()
@@ -184,6 +247,7 @@ export const createFinancialMovement = async (
         INSERT INTO financial_movements (
           user_id,
           gig_id,
+          band_id,
           type,
           amount,
           category,
@@ -191,13 +255,14 @@ export const createFinancialMovement = async (
           date
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7
+          $1, $2, $3, $4, $5, $6, $7, $8
         )
         RETURNING *
       `,
       [
         userId,
         normalizedGigId,
+        normalizedBandId,
         normalizedType,
         parsedAmount,
         normalizedCategory,
@@ -232,7 +297,8 @@ export const updateFinancialMovement = async (
     });
   }
 
-  const { type, amount, category, description, date, gig_id } = req.body;
+  const { type, amount, category, description, date, gig_id, band_id } =
+    req.body;
 
   const normalizedType = normalizeMovementType(type);
 
@@ -259,6 +325,27 @@ export const updateFinancialMovement = async (
   }
 
   let normalizedGigId: number | null = null;
+  let normalizedBandId: number | null = null;
+
+  if (band_id !== null && band_id !== undefined && band_id !== "") {
+    const parsedBandId = Number(band_id);
+
+    if (!Number.isInteger(parsedBandId) || parsedBandId <= 0) {
+      return res.status(400).json({
+        error: "La banda indicada no es válida",
+      });
+    }
+
+    const canAccess = await userCanAccessBand(userId, parsedBandId);
+
+    if (!canAccess) {
+      return res.status(403).json({
+        error: "No tienes acceso a la banda seleccionada",
+      });
+    }
+
+    normalizedBandId = parsedBandId;
+  }
 
   if (gig_id !== null && gig_id !== undefined && gig_id !== "") {
     const parsedGigId = Number(gig_id);
@@ -280,6 +367,23 @@ export const updateFinancialMovement = async (
     normalizedGigId = parsedGigId;
   }
 
+  if (normalizedGigId !== null) {
+    const gigResult = await pool.query(
+      `
+      SELECT band_id
+      FROM gigs
+      WHERE id = $1
+      LIMIT 1
+    `,
+      [normalizedGigId],
+    );
+
+    normalizedBandId =
+      gigResult.rows[0]?.band_id != null
+        ? Number(gigResult.rows[0].band_id)
+        : null;
+  }
+
   const normalizedDescription =
     typeof description === "string" && description.trim()
       ? description.trim()
@@ -296,18 +400,20 @@ export const updateFinancialMovement = async (
         UPDATE financial_movements
         SET
           gig_id = $1,
-          type = $2,
-          amount = $3,
-          category = $4,
-          description = $5,
-          date = $6,
+          band_id = $2,
+          type = $3,
+          amount = $4,
+          category = $5,
+          description = $6,
+          date = $7,
           updated_at = NOW()
-        WHERE id = $7
-          AND user_id = $8
+        WHERE id = $8
+          AND user_id = $9
         RETURNING *
       `,
       [
         normalizedGigId,
+        normalizedBandId,
         normalizedType,
         parsedAmount,
         normalizedCategory,
