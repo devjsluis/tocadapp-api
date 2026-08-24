@@ -532,6 +532,70 @@ export const resetPassword = async (req: Request, res: Response) => {
   }
 };
 
+export const changePassword = async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({
+      error: "La contraseña actual y la nueva contraseña son obligatorias",
+    });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({
+      error: "La nueva contraseña debe tener al menos 6 caracteres",
+    });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({
+      error: "La nueva contraseña debe ser diferente a la actual",
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT password FROM users WHERE id = $1",
+      [userId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const user = result.rows[0];
+
+    const validPassword = await bcrypt.compare(currentPassword, user.password);
+
+    if (!validPassword) {
+      return res.status(401).json({
+        error: "La contraseña actual es incorrecta",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await pool.query("UPDATE users SET password = $1 WHERE id = $2", [
+      hashedPassword,
+      userId,
+    ]);
+
+    return res.json({
+      ok: true,
+      message: "Contraseña actualizada correctamente",
+    });
+  } catch (error: any) {
+    console.error("Error en changePassword:", error);
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
+  }
+};
+
 export const getUsers = async (_req: Request, res: Response) => {
   try {
     const result = await pool.query(
