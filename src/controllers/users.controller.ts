@@ -195,9 +195,16 @@ export const loginUser = async (req: Request, res: Response) => {
   const { email, password } = req.body;
 
   try {
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email,
-    ]);
+    const result = await pool.query(
+      `
+    SELECT *
+    FROM users
+    WHERE LOWER(email) = LOWER($1)
+      AND deleted_at IS NULL
+    LIMIT 1
+  `,
+      [String(email).trim()],
+    );
 
     if (result.rowCount === 0) {
       return res.status(401).json({ error: "El correo electrónico no existe" });
@@ -305,6 +312,7 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
           email_verified_at
         FROM users
         WHERE id = $1
+          AND deleted_at IS NULL
         LIMIT 1
       `,
       [decoded.id],
@@ -408,8 +416,14 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
   try {
     const result = await pool.query(
-      "SELECT id, name FROM users WHERE email = $1",
-      [email],
+      `
+    SELECT id, name
+    FROM users
+    WHERE LOWER(email) = LOWER($1)
+      AND deleted_at IS NULL
+    LIMIT 1
+  `,
+      [String(email).trim()],
     );
 
     if (result.rowCount === 0) {
@@ -593,6 +607,112 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({
       error: "Error interno del servidor",
     });
+  }
+};
+
+export const deleteAccount = async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  const { password } = req.body;
+
+  if (!password || typeof password !== "string") {
+    return res.status(400).json({
+      error: "La contraseña es obligatoria",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const userResult = await client.query(
+      `
+        SELECT id, password, deleted_at
+        FROM users
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [userId],
+    );
+
+    if (userResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    if (user.deleted_at) {
+      await client.query("ROLLBACK");
+
+      return res.status(410).json({
+        error: "Esta cuenta ya fue eliminada",
+      });
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password);
+
+    if (!validPassword) {
+      await client.query("ROLLBACK");
+
+      return res.status(401).json({
+        error: "La contraseña es incorrecta",
+      });
+    }
+
+    const anonymousEmail = `deleted-${userId}-${randomBytes(8).toString(
+      "hex",
+    )}@deleted.tocadapp.local`;
+
+    const unusablePassword = await bcrypt.hash(
+      randomBytes(32).toString("hex"),
+      10,
+    );
+
+    await client.query(
+      `
+        UPDATE password_reset_tokens
+        SET used = TRUE
+        WHERE user_id = $1
+          AND used = FALSE
+      `,
+      [userId],
+    );
+
+    await client.query(
+      `
+        UPDATE users
+        SET
+          email = $1,
+          name = 'Usuario',
+          last_name = 'eliminado',
+          password = $2,
+          email_verified_at = NULL,
+          deleted_at = NOW()
+        WHERE id = $3
+      `,
+      [anonymousEmail, unusablePassword, userId],
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      message: "Tu cuenta fue eliminada correctamente",
+    });
+  } catch (error: unknown) {
+    await client.query("ROLLBACK");
+
+    console.error("Error en deleteAccount:", error);
+
+    return res.status(500).json({
+      error: "No fue posible eliminar la cuenta",
+    });
+  } finally {
+    client.release();
   }
 };
 
