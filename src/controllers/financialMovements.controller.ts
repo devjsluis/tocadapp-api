@@ -53,6 +53,7 @@ async function userCanAccessBand(
         ON bm.band_id = b.id
        AND bm.user_id = $2
       WHERE b.id = $1
+        AND b.archived_at IS NULL
         AND (
           b.owner_id = $2
           OR bm.user_id = $2

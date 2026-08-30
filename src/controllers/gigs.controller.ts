@@ -102,15 +102,20 @@ export const createGig = async (req: AuthRequest, res: Response) => {
 
   if (normalizedBandId !== null) {
     const bandCheck = await pool.query(
-      `SELECT b.id FROM bands b
-       LEFT JOIN band_members bm ON bm.band_id = b.id AND bm.user_id = $2
-       WHERE b.id = $1 AND (b.owner_id = $2 OR bm.can_create_gigs = TRUE)`,
+      `SELECT b.id
+     FROM bands b
+     LEFT JOIN band_members bm
+       ON bm.band_id = b.id
+       AND bm.user_id = $2
+     WHERE b.id = $1
+       AND b.archived_at IS NULL
+       AND (b.owner_id = $2 OR bm.can_create_gigs = TRUE)`,
       [normalizedBandId, userId],
     );
 
     if (bandCheck.rowCount === 0) {
       return res.status(403).json({
-        error: "No tienes permiso para agregar tocadas a esta banda",
+        error: "No tienes permiso para asignar esta tocada a esta banda",
       });
     }
   }
@@ -232,6 +237,57 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
     band_id === "" || band_id === null || band_id === undefined
       ? null
       : Number(band_id);
+
+  const currentGigResult = await pool.query(
+    `SELECT band_id
+   FROM gigs
+   WHERE id = $1
+     AND (
+       user_id = $2
+       OR (
+         band_id IS NOT NULL
+         AND band_id IN (
+           SELECT id
+           FROM bands
+           WHERE owner_id = $2
+         )
+       )
+     )`,
+    [id, userId],
+  );
+
+  if (currentGigResult.rowCount === 0) {
+    return res.status(404).json({
+      error: "Tocada no encontrada o no autorizado",
+    });
+  }
+
+  const currentBandId =
+    currentGigResult.rows[0].band_id !== null
+      ? Number(currentGigResult.rows[0].band_id)
+      : null;
+
+  const isKeepingSameBand = currentBandId === normalizedBandId;
+
+  if (normalizedBandId !== null && !isKeepingSameBand) {
+    const bandCheck = await pool.query(
+      `SELECT b.id
+     FROM bands b
+     LEFT JOIN band_members bm
+       ON bm.band_id = b.id
+       AND bm.user_id = $2
+     WHERE b.id = $1
+       AND b.archived_at IS NULL
+       AND (b.owner_id = $2 OR bm.can_create_gigs = TRUE)`,
+      [normalizedBandId, userId],
+    );
+
+    if (bandCheck.rowCount === 0) {
+      return res.status(403).json({
+        error: "No tienes permiso para asignar esta tocada a esta banda",
+      });
+    }
+  }
 
   const sql = `
   UPDATE gigs
