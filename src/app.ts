@@ -4,6 +4,7 @@ import swaggerUi from "swagger-ui-express";
 import { swaggerSpec } from "./swagger";
 import gigsRoutes from "./routes/gigs.routes";
 import usersRoutes from "./routes/users.routes";
+import placesRoutes from "./routes/places.routes";
 import musiciansRoutes from "./routes/musicians.routes";
 import bandsRoutes from "./routes/bands.routes";
 import expensesRoutes from "./routes/expenses.routes";
@@ -70,6 +71,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/gigs", authMiddleware, gigsRoutes);
+app.use("/places", placesRoutes);
 app.use("/musicians", authMiddleware, musiciansRoutes);
 app.use("/expenses", authMiddleware, expensesRoutes);
 app.use("/financial-movements", authMiddleware, financialMovementsRoutes);
