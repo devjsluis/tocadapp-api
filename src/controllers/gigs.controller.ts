@@ -16,10 +16,21 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
        LEFT JOIN gig_earnings ge ON ge.gig_id = g.id AND ge.user_id = $1
        LEFT JOIN gig_attendance ga ON ga.gig_id = g.id AND ga.user_id = $1
        WHERE g.user_id = $1
-          OR (g.band_id IS NOT NULL AND g.band_id IN (
-            SELECT band_id FROM band_members WHERE user_id = $1
-          ))
-       ORDER BY g.date ASC`,
+          OR (
+            g.band_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM band_member_periods bmp
+              WHERE bmp.band_id = g.band_id
+                AND bmp.user_id = $1
+                AND (g.date + g.time) >= bmp.joined_at
+                AND (
+                  bmp.left_at IS NULL
+                  OR (g.date + g.time) <= bmp.left_at
+                )
+            )
+          )
+        ORDER BY g.date ASC`,
       [userId],
     );
     return res.json({
