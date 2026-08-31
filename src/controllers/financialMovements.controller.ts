@@ -26,10 +26,16 @@ async function userCanAccessGig(
           g.user_id = $2
           OR (
             g.band_id IS NOT NULL
-            AND g.band_id IN (
-              SELECT bm.band_id
-              FROM band_members bm
-              WHERE bm.user_id = $2
+            AND EXISTS (
+              SELECT 1
+              FROM band_member_periods bmp
+              WHERE bmp.band_id = g.band_id
+                AND bmp.user_id = $2
+                AND (g.date + g.time) >= bmp.joined_at
+                AND (
+                  bmp.left_at IS NULL
+                  OR (g.date + g.time) <= bmp.left_at
+                )
             )
           )
         )

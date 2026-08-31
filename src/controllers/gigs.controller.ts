@@ -2,6 +2,40 @@ import { Response } from "express";
 import { pool } from "../lib/db";
 import { AuthRequest } from "../middleware/auth";
 
+async function userCanAccessGig(
+  userId: number,
+  gigId: number | string,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      SELECT g.id
+      FROM gigs g
+      WHERE g.id = $1
+        AND (
+          g.user_id = $2
+          OR (
+            g.band_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM band_member_periods bmp
+              WHERE bmp.band_id = g.band_id
+                AND bmp.user_id = $2
+                AND (g.date + g.time) >= bmp.joined_at
+                AND (
+                  bmp.left_at IS NULL
+                  OR (g.date + g.time) <= bmp.left_at
+                )
+            )
+          )
+        )
+      LIMIT 1
+    `,
+    [gigId, userId],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
 export const getGigs = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
   try {
@@ -365,21 +399,20 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
 };
 
 export const setMyEarnings = async (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
+  const id = Number(req.params.id);
   const { amount, collected_amount } = req.body;
   const userId = req.user!.id;
 
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({
+      error: "Tocada inválida",
+    });
+  }
+
   try {
-    const gigCheck = await pool.query(
-      `SELECT g.id FROM gigs g
-       WHERE g.id = $1
-         AND (g.user_id = $2
-              OR (g.band_id IS NOT NULL AND g.band_id IN (
-                SELECT band_id FROM band_members WHERE user_id = $2
-              )))`,
-      [id, userId],
-    );
-    if (gigCheck.rowCount === 0) {
+    const canAccess = await userCanAccessGig(userId, id);
+
+    if (!canAccess) {
       return res
         .status(404)
         .json({ error: "Gig no encontrada o no autorizado" });
@@ -423,21 +456,20 @@ export const setCollected = async (req: AuthRequest, res: Response) => {
 };
 
 export const setAttending = async (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
+  const id = Number(req.params.id);
   const { attending } = req.body;
   const userId = req.user!.id;
 
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({
+      error: "Tocada inválida",
+    });
+  }
+
   try {
-    const gigCheck = await pool.query(
-      `SELECT g.id FROM gigs g
-       WHERE g.id = $1
-         AND (g.user_id = $2
-              OR (g.band_id IS NOT NULL AND g.band_id IN (
-                SELECT band_id FROM band_members WHERE user_id = $2
-              )))`,
-      [id, userId],
-    );
-    if (gigCheck.rowCount === 0) {
+    const canAccess = await userCanAccessGig(userId, id);
+
+    if (!canAccess) {
       return res
         .status(404)
         .json({ error: "Gig no encontrada o no autorizado" });
@@ -456,6 +488,7 @@ export const setAttending = async (req: AuthRequest, res: Response) => {
         [id, userId, attending],
       );
     }
+
     return res.json({ ok: true });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
