@@ -89,6 +89,12 @@ export const createBand = async (req: AuthRequest, res: Response) => {
       [band.id, userId, "leader"],
     );
 
+    await client.query(
+      `INSERT INTO band_member_periods (band_id, user_id, joined_at)
+   VALUES ($1, $2, NOW())`,
+      [band.id, userId],
+    );
+
     await client.query("COMMIT");
     return res.status(201).json({
       ok: true,
@@ -110,43 +116,67 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
     return res.status(400).json({ error: "Código de invitación requerido" });
   }
 
+  const client = await pool.connect();
+
   try {
-    const bandResult = await pool.query(
+    await client.query("BEGIN");
+
+    const bandResult = await client.query(
       `SELECT *
        FROM bands
        WHERE invite_code = $1
-        AND archived_at IS NULL`,
+         AND archived_at IS NULL
+       FOR UPDATE`,
       [String(invite_code).trim().toUpperCase()],
     );
 
     if (bandResult.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Código de invitación inválido" });
     }
 
     const band = bandResult.rows[0];
 
     if (band.owner_id === userId) {
+      await client.query("ROLLBACK");
       return res
         .status(400)
         .json({ error: "Ya eres el encargado de esta banda" });
     }
 
-    const existing = await pool.query(
-      "SELECT id FROM band_members WHERE band_id = $1 AND user_id = $2",
+    const existing = await client.query(
+      `SELECT id
+       FROM band_members
+       WHERE band_id = $1
+         AND user_id = $2`,
       [band.id, userId],
     );
+
     if (existing.rowCount! > 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "Ya eres miembro de esta banda" });
     }
 
-    await pool.query(
-      "INSERT INTO band_members (band_id, user_id, role) VALUES ($1, $2, $3)",
+    await client.query(
+      `INSERT INTO band_members (band_id, user_id, role)
+       VALUES ($1, $2, $3)`,
       [band.id, userId, "musician"],
     );
 
+    await client.query(
+      `INSERT INTO band_member_periods (band_id, user_id, joined_at)
+       VALUES ($1, $2, NOW())`,
+      [band.id, userId],
+    );
+
+    await client.query("COMMIT");
+
     return res.json({ ok: true, data: band });
   } catch (error: any) {
+    await client.query("ROLLBACK");
     return res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 };
 
@@ -335,30 +365,73 @@ export const leaveBand = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   const userId = req.user!.id;
 
+  const client = await pool.connect();
+
   try {
-    const bandResult = await pool.query(
+    await client.query("BEGIN");
+
+    const bandResult = await client.query(
       "SELECT owner_id FROM bands WHERE id = $1",
       [id],
     );
+
     if (bandResult.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Banda no encontrada" });
     }
+
     if (bandResult.rows[0].owner_id === userId) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         error:
           "El encargado no puede salir de la banda. Puedes deshabilitarla o eliminarla si no tiene historial.",
       });
     }
 
-    const result = await pool.query(
-      "DELETE FROM band_members WHERE band_id = $1 AND user_id = $2 RETURNING *",
+    const membershipResult = await client.query(
+      `SELECT id
+       FROM band_members
+       WHERE band_id = $1
+         AND user_id = $2
+       FOR UPDATE`,
       [id, userId],
     );
-    if (result.rowCount === 0) {
+
+    if (membershipResult.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "No eres miembro de esta banda" });
     }
+
+    const periodResult = await client.query(
+      `UPDATE band_member_periods
+       SET left_at = NOW()
+       WHERE band_id = $1
+         AND user_id = $2
+         AND left_at IS NULL
+       RETURNING id`,
+      [id, userId],
+    );
+
+    if (periodResult.rowCount !== 1) {
+      throw new Error(
+        "No se encontró un periodo activo válido para esta membresía",
+      );
+    }
+
+    await client.query(
+      `DELETE FROM band_members
+       WHERE band_id = $1
+         AND user_id = $2`,
+      [id, userId],
+    );
+
+    await client.query("COMMIT");
+
     return res.json({ ok: true });
   } catch (error: any) {
+    await client.query("ROLLBACK");
     return res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 };
