@@ -1,0 +1,7 @@
+ALTER TABLE band_member_periods
+  ALTER COLUMN joined_at TYPE TIMESTAMPTZ
+    USING joined_at AT TIME ZONE 'UTC',
+  ALTER COLUMN left_at TYPE TIMESTAMPTZ
+    USING left_at AT TIME ZONE 'UTC',
+  ALTER COLUMN created_at TYPE TIMESTAMPTZ
+    USING created_at AT TIME ZONE 'UTC';

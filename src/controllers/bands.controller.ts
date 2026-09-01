@@ -207,6 +207,80 @@ export const getBandMembers = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const getMemberPeriods = async (req: AuthRequest, res: Response) => {
+  const bandId = Number(req.params.id);
+  const memberUserId = Number(req.params.userId);
+  const requesterId = req.user!.id;
+
+  if (!Number.isInteger(bandId) || bandId <= 0) {
+    return res.status(400).json({
+      error: "Banda inválida",
+    });
+  }
+
+  if (!Number.isInteger(memberUserId) || memberUserId <= 0) {
+    return res.status(400).json({
+      error: "Usuario inválido",
+    });
+  }
+
+  try {
+    const bandResult = await pool.query(
+      `SELECT id, owner_id
+       FROM bands
+       WHERE id = $1`,
+      [bandId],
+    );
+
+    if (bandResult.rowCount === 0) {
+      return res.status(404).json({
+        error: "Banda no encontrada",
+      });
+    }
+
+    const band = bandResult.rows[0];
+
+    const isOwner = Number(band.owner_id) === requesterId;
+    const isSelf = memberUserId === requesterId;
+
+    if (!isOwner && !isSelf) {
+      return res.status(403).json({
+        error: "No tienes permiso para consultar estos periodos",
+      });
+    }
+
+    const periodsResult = await pool.query(
+      `SELECT
+         bmp.id,
+         bmp.band_id,
+         bmp.user_id,
+         bmp.joined_at,
+         bmp.left_at,
+         bmp.created_at
+       FROM band_member_periods bmp
+       WHERE bmp.band_id = $1
+         AND bmp.user_id = $2
+       ORDER BY bmp.joined_at ASC`,
+      [bandId, memberUserId],
+    );
+
+    if (periodsResult.rowCount === 0) {
+      return res.status(404).json({
+        error: "No se encontraron periodos para este integrante",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      data: periodsResult.rows,
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      error: error.message,
+    });
+  }
+};
+
 export const archiveBand = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   const userId = req.user!.id;
@@ -431,6 +505,255 @@ export const leaveBand = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     await client.query("ROLLBACK");
     return res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+export const updateMemberPeriod = async (req: AuthRequest, res: Response) => {
+  const bandId = Number(req.params.id);
+  const memberUserId = Number(req.params.userId);
+  const periodId = Number(req.params.periodId);
+  const requesterId = req.user!.id;
+
+  const { joined_at, left_at } = req.body;
+
+  if (!Number.isInteger(bandId) || bandId <= 0) {
+    return res.status(400).json({ error: "Banda inválida" });
+  }
+
+  if (!Number.isInteger(memberUserId) || memberUserId <= 0) {
+    return res.status(400).json({ error: "Usuario inválido" });
+  }
+
+  if (!Number.isInteger(periodId) || periodId <= 0) {
+    return res.status(400).json({ error: "Periodo inválido" });
+  }
+
+  const parsedJoinedAt = new Date(joined_at);
+
+  if (Number.isNaN(parsedJoinedAt.getTime())) {
+    return res.status(400).json({
+      error: "La fecha de entrada no es válida",
+    });
+  }
+
+  const parsedLeftAt =
+    left_at === null || left_at === undefined || left_at === ""
+      ? null
+      : new Date(left_at);
+
+  if (parsedLeftAt && Number.isNaN(parsedLeftAt.getTime())) {
+    return res.status(400).json({
+      error: "La fecha de salida no es válida",
+    });
+  }
+
+  if (parsedLeftAt && parsedLeftAt < parsedJoinedAt) {
+    return res.status(400).json({
+      error: "La fecha de salida no puede ser anterior a la fecha de entrada",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const bandResult = await client.query(
+      `SELECT id, owner_id
+       FROM bands
+       WHERE id = $1
+       FOR UPDATE`,
+      [bandId],
+    );
+
+    if (bandResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "Banda no encontrada",
+      });
+    }
+
+    if (Number(bandResult.rows[0].owner_id) !== requesterId) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "Solo el encargado puede modificar periodos",
+      });
+    }
+
+    const periodResult = await client.query(
+      `SELECT id, band_id, user_id, joined_at, left_at
+       FROM band_member_periods
+       WHERE id = $1
+         AND band_id = $2
+         AND user_id = $3
+       FOR UPDATE`,
+      [periodId, bandId, memberUserId],
+    );
+
+    if (periodResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "Periodo no encontrado",
+      });
+    }
+
+    const currentPeriod = periodResult.rows[0];
+
+    const currentMembershipResult = await client.query(
+      `SELECT id
+   FROM band_members
+   WHERE band_id = $1
+     AND user_id = $2
+   LIMIT 1`,
+      [bandId, memberUserId],
+    );
+
+    const isCurrentMember = (currentMembershipResult.rowCount ?? 0) > 0;
+    const isCurrentOpenPeriod = currentPeriod.left_at === null;
+
+    if (isCurrentMember && isCurrentOpenPeriod && parsedLeftAt !== null) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error:
+          "No puedes cerrar el periodo activo mientras el integrante siga perteneciendo a la banda",
+      });
+    }
+
+    if (!isCurrentMember && parsedLeftAt === null) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error:
+          "No puedes dejar un periodo abierto para un integrante que ya no pertenece a la banda",
+      });
+    }
+
+    const overlapResult = await client.query(
+      `SELECT id
+   FROM band_member_periods
+   WHERE band_id = $1
+     AND user_id = $2
+     AND id <> $3
+     AND joined_at <= COALESCE($5::timestamptz, 'infinity'::timestamptz)
+     AND COALESCE(left_at, 'infinity'::timestamptz) >= $4::timestamptz
+   LIMIT 1`,
+      [
+        bandId,
+        memberUserId,
+        periodId,
+        parsedJoinedAt.toISOString(),
+        parsedLeftAt?.toISOString() ?? null,
+      ],
+    );
+
+    if ((overlapResult.rowCount ?? 0) > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "El periodo se empalma con otro periodo del integrante",
+      });
+    }
+
+    const affectedGigs = await client.query(
+      `SELECT g.id, g.title, g.date, g.time
+   FROM gigs g
+   WHERE g.band_id = $1
+     AND (g.date + g.time) >= ($2::timestamptz AT TIME ZONE 'UTC')
+     AND (
+       $3::timestamptz IS NULL
+       OR (g.date + g.time) <= ($3::timestamptz AT TIME ZONE 'UTC')
+     )
+     AND NOT (
+       (g.date + g.time) >= ($4::timestamptz AT TIME ZONE 'UTC')
+       AND (
+         $5::timestamptz IS NULL
+         OR (g.date + g.time) <= ($5::timestamptz AT TIME ZONE 'UTC')
+       )
+     )`,
+      [
+        bandId,
+        currentPeriod.joined_at,
+        currentPeriod.left_at,
+        parsedJoinedAt.toISOString(),
+        parsedLeftAt?.toISOString() ?? null,
+      ],
+    );
+
+    for (const gig of affectedGigs.rows) {
+      const historyResult = await client.query(
+        `SELECT
+           EXISTS (
+             SELECT 1
+             FROM gig_earnings ge
+             WHERE ge.gig_id = $1
+               AND ge.user_id = $2
+           ) AS has_earnings,
+
+           EXISTS (
+             SELECT 1
+             FROM gig_attendance ga
+             WHERE ga.gig_id = $1
+               AND ga.user_id = $2
+           ) AS has_attendance,
+
+           EXISTS (
+             SELECT 1
+             FROM financial_movements fm
+             WHERE fm.gig_id = $1
+               AND fm.user_id = $2
+           ) AS has_financial_movements`,
+        [gig.id, memberUserId],
+      );
+
+      const history = historyResult.rows[0];
+
+      if (
+        history.has_earnings ||
+        history.has_attendance ||
+        history.has_financial_movements
+      ) {
+        await client.query("ROLLBACK");
+
+        return res.status(409).json({
+          error:
+            "No puedes modificar este periodo porque dejaría fuera una tocada con historial registrado",
+          gig: {
+            id: gig.id,
+            title: gig.title,
+            date: gig.date,
+            time: gig.time,
+          },
+        });
+      }
+    }
+
+    const updatedResult = await client.query(
+      `UPDATE band_member_periods
+       SET joined_at = $1,
+           left_at = $2
+       WHERE id = $3
+       RETURNING *`,
+      [
+        parsedJoinedAt.toISOString(),
+        parsedLeftAt?.toISOString() ?? null,
+        periodId,
+      ],
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      data: updatedResult.rows[0],
+    });
+  } catch (error: any) {
+    await client.query("ROLLBACK");
+
+    return res.status(500).json({
+      error: error.message,
+    });
   } finally {
     client.release();
   }
