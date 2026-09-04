@@ -85,6 +85,7 @@ export const createGig = async (req: AuthRequest, res: Response) => {
     time,
     amount,
     hours,
+    free_hours,
     notes,
     band_id,
     location_address,
@@ -96,6 +97,11 @@ export const createGig = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
 
   const parsedHours = Number(hours);
+
+  const parsedFreeHours =
+    free_hours === null || free_hours === undefined || free_hours === ""
+      ? 0
+      : Number(free_hours);
 
   const hasLatitude =
     latitude !== null && latitude !== undefined && latitude !== "";
@@ -137,6 +143,16 @@ export const createGig = async (req: AuthRequest, res: Response) => {
   if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
     return res.status(400).json({
       error: "La duración debe ser un número mayor a 0",
+    });
+  }
+
+  if (
+    !Number.isFinite(parsedFreeHours) ||
+    parsedFreeHours < 0 ||
+    parsedFreeHours > parsedHours
+  ) {
+    return res.status(400).json({
+      error: "Las horas gratis deben estar entre 0 y la duración total",
     });
   }
 
@@ -172,8 +188,9 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       date,
       time,
       amount,
-      hours,
-      notes,
+hours,
+free_hours,
+notes,
       user_id,
       band_id,
       location_address,
@@ -182,9 +199,9 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       google_place_id
     )
     VALUES (
-      $1, $2, $3, $4, $5, $6, $7,
-      $8, $9, $10, $11, $12, $13
-    )
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11, $12, $13, $14
+)
     RETURNING *
   `;
 
@@ -196,6 +213,7 @@ export const createGig = async (req: AuthRequest, res: Response) => {
       time,
       amount ?? null,
       parsedHours,
+      parsedFreeHours,
       notes?.trim() || null,
       userId,
       normalizedBandId,
@@ -224,6 +242,7 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
     time,
     amount,
     hours,
+    free_hours,
     notes,
     band_id,
     location_address,
@@ -234,6 +253,11 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
 
   const parsedHours = Number(hours);
+
+  const parsedFreeHours =
+    free_hours === null || free_hours === undefined || free_hours === ""
+      ? 0
+      : Number(free_hours);
 
   const hasLatitude =
     latitude !== null && latitude !== undefined && latitude !== "";
@@ -275,6 +299,16 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
     return res.status(400).json({
       error: "La duración debe ser un número mayor a 0",
+    });
+  }
+
+  if (
+    !Number.isFinite(parsedFreeHours) ||
+    parsedFreeHours < 0 ||
+    parsedFreeHours > parsedHours
+  ) {
+    return res.status(400).json({
+      error: "Las horas gratis deben estar entre 0 y la duración total",
     });
   }
 
@@ -337,31 +371,32 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   const sql = `
   UPDATE gigs
   SET
-    title = $1,
-    place = $2,
-    date = $3,
-    time = $4,
-    amount = $5,
-    hours = $6,
-    notes = $7,
-    band_id = $8,
-    location_address = $9,
-    latitude = $10,
-    longitude = $11,
-    google_place_id = $12
-  WHERE id = $13
-    AND (
-      user_id = $14
-      OR (
-        band_id IS NOT NULL
-        AND band_id IN (
-          SELECT id
-          FROM bands
-          WHERE owner_id = $14
-        )
+  title = $1,
+  place = $2,
+  date = $3,
+  time = $4,
+  amount = $5,
+  hours = $6,
+  free_hours = $7,
+  notes = $8,
+  band_id = $9,
+  location_address = $10,
+  latitude = $11,
+  longitude = $12,
+  google_place_id = $13
+WHERE id = $14
+  AND (
+    user_id = $15
+    OR (
+      band_id IS NOT NULL
+      AND band_id IN (
+        SELECT id
+        FROM bands
+        WHERE owner_id = $15
       )
     )
-  RETURNING *
+  )
+RETURNING *
 `;
 
   try {
@@ -372,6 +407,7 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
       time,
       amount ?? null,
       parsedHours,
+      parsedFreeHours,
       notes?.trim() || null,
       normalizedBandId,
       location_address?.trim() || null,
