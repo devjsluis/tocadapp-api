@@ -255,6 +255,11 @@ notes,
             (row) => Number(row.user_id),
           );
 
+          console.log("DELETE PUSH - destinatarios:", {
+            rows: recipientsResult.rows,
+            userIds,
+          });
+
           if (userIds.length > 0) {
             const bandName = recipientsResult.rows[0].band_name;
             const creatorName =
@@ -735,6 +740,15 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
     }
 
     const deletedGig = result.rows[0];
+
+    console.log("DELETE PUSH - tocada eliminada:", {
+      id: deletedGig.id,
+      title: deletedGig.title,
+      band_id: deletedGig.band_id,
+      date: deletedGig.date,
+      time: deletedGig.time,
+      actor: userId,
+    });
 
     if (deletedGig.band_id !== null) {
       void (async () => {
