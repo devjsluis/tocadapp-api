@@ -98,7 +98,7 @@ async function checkReminder(
               bmp.left_at IS NULL
               OR (
                 ug.gig_date::date + ug.gig_time::time
-              ) <= bmp.left_at
+              ) AT TIME ZONE $1 <= bmp.left_at
             )
         ) recipient
       )
@@ -193,6 +193,134 @@ async function checkReminder(
   }
 }
 
+
+async function checkPendingPayments(): Promise<void> {
+  const notificationType = "gig_payment_pending";
+
+  const result = await pool.query<ReminderRow>(
+    `
+      WITH yesterday_gigs AS (
+        SELECT
+          g.id AS gig_id,
+          g.title,
+          g.place,
+          g.band_id,
+          g.user_id AS owner_user_id,
+          g.collected_amount AS owner_collected_amount,
+          TO_CHAR(g.date, 'YYYY-MM-DD') AS gig_date,
+          TO_CHAR(g.time, 'HH24:MI:SS') AS gig_time
+        FROM gigs g
+        WHERE g.date = (
+          (NOW() AT TIME ZONE $1)::date - INTERVAL '1 day'
+        )::date
+      ),
+      recipients AS (
+        SELECT DISTINCT
+          yg.gig_id,
+          yg.title,
+          yg.place,
+          yg.band_id,
+          yg.gig_date,
+          yg.gig_time,
+          recipient.user_id,
+          recipient.collected_amount
+        FROM yesterday_gigs yg
+        CROSS JOIN LATERAL (
+          SELECT
+            yg.owner_user_id AS user_id,
+            yg.owner_collected_amount AS collected_amount
+
+          UNION ALL
+
+          SELECT
+            bmp.user_id,
+            ge.collected_amount
+          FROM band_member_periods bmp
+          LEFT JOIN gig_earnings ge
+            ON ge.gig_id = yg.gig_id
+           AND ge.user_id = bmp.user_id
+          WHERE yg.band_id IS NOT NULL
+            AND bmp.band_id = yg.band_id
+            AND bmp.user_id <> yg.owner_user_id
+            AND (
+              yg.gig_date::date + yg.gig_time::time
+            ) AT TIME ZONE $1 >= bmp.joined_at
+            AND (
+              bmp.left_at IS NULL
+              OR (
+                yg.gig_date::date + yg.gig_time::time
+              ) AT TIME ZONE $1 <= bmp.left_at
+            )
+        ) recipient
+      )
+      SELECT r.*
+      FROM recipients r
+      WHERE r.collected_amount IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM user_push_tokens upt
+          WHERE upt.user_id = r.user_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM gig_notification_deliveries gnd
+          WHERE gnd.gig_id = r.gig_id
+            AND gnd.user_id = r.user_id
+            AND gnd.notification_type = $2
+            AND gnd.gig_date = r.gig_date::date
+            AND gnd.gig_time = r.gig_time::time
+        )
+      ORDER BY r.gig_id, r.user_id
+    `,
+    [APP_TIMEZONE, notificationType],
+  );
+
+  for (const row of result.rows) {
+    try {
+      await sendPushToUsers({
+        userIds: [Number(row.user_id)],
+        title: "Cobro pendiente",
+        body: `Aún no has registrado el cobro de "${row.title}".`,
+        data: {
+          type: notificationType,
+          gigId: row.gig_id,
+          bandId: row.band_id,
+        },
+      });
+
+      await pool.query(
+        `
+          INSERT INTO gig_notification_deliveries (
+            gig_id,
+            user_id,
+            notification_type,
+            gig_date,
+            gig_time
+          )
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT DO NOTHING
+        `,
+        [
+          row.gig_id,
+          row.user_id,
+          notificationType,
+          row.gig_date,
+          row.gig_time,
+        ],
+      );
+
+      console.log(
+        `${notificationType} enviado para tocada ${row.gig_id} al usuario ${row.user_id}`,
+      );
+    } catch (error) {
+      console.error(
+        `Error enviando ${notificationType} de tocada ${row.gig_id} al usuario ${row.user_id}:`,
+        error,
+      );
+    }
+  }
+}
+
 export async function checkGigReminders(): Promise<void> {
   if (isRunning) {
     return;
@@ -204,6 +332,8 @@ export async function checkGigReminders(): Promise<void> {
     for (const reminder of REMINDERS) {
       await checkReminder(reminder);
     }
+
+    await checkPendingPayments();
   } catch (error) {
     console.error(
       "Error al revisar recordatorios de tocadas:",
