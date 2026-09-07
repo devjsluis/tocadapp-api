@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { pool } from "../lib/db";
 import { AuthRequest } from "../middleware/auth";
+import { sendPushToUsers } from "../services/pushNotifications.service";
 
 async function userCanAccessGig(
   userId: number,
@@ -223,7 +224,63 @@ notes,
       google_place_id?.trim() || null,
     ]);
 
-    return res.status(201).json(result.rows[0]);
+    const createdGig = result.rows[0];
+
+    if (normalizedBandId !== null) {
+      void (async () => {
+        try {
+          const recipientsResult = await pool.query(
+            `
+              SELECT DISTINCT
+                bmp.user_id,
+                b.name AS band_name,
+                creator.name AS creator_name
+              FROM band_member_periods bmp
+              JOIN bands b
+                ON b.id = bmp.band_id
+              JOIN users creator
+                ON creator.id = $2
+              WHERE bmp.band_id = $1
+                AND bmp.user_id <> $2
+                AND ($3::date + $4::time) >= bmp.joined_at
+                AND (
+                  bmp.left_at IS NULL
+                  OR ($3::date + $4::time) <= bmp.left_at
+                )
+            `,
+            [normalizedBandId, userId, date, time],
+          );
+
+          const userIds = recipientsResult.rows.map(
+            (row) => Number(row.user_id),
+          );
+
+          if (userIds.length > 0) {
+            const bandName = recipientsResult.rows[0].band_name;
+            const creatorName =
+              recipientsResult.rows[0].creator_name || "Un integrante";
+
+            await sendPushToUsers({
+              userIds,
+              title: `Nueva tocada · ${bandName}`,
+              body: `${creatorName} agregó "${createdGig.title}".`,
+              data: {
+                type: "gig_created",
+                gigId: createdGig.id,
+                bandId: normalizedBandId,
+              },
+            });
+          }
+        } catch (notificationError) {
+          console.error(
+            "Error al preparar notificación de tocada creada:",
+            notificationError,
+          );
+        }
+      })();
+    }
+
+    return res.status(201).json(createdGig);
   } catch (error: any) {
     console.error("Error al crear tocada:", error);
 
