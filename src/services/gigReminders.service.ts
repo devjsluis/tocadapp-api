@@ -213,6 +213,8 @@ async function checkPendingPayments(): Promise<void> {
         WHERE g.date = (
           (NOW() AT TIME ZONE $1)::date - INTERVAL '1 day'
         )::date
+          AND (NOW() AT TIME ZONE $1)::time >= TIME '10:00'
+          AND (NOW() AT TIME ZONE $1)::time < TIME '10:10'
       ),
       recipients AS (
         SELECT DISTINCT
