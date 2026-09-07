@@ -733,8 +733,71 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
         .status(404)
         .json({ error: "Tocada no encontrada o no autorizado" });
     }
+
+    const deletedGig = result.rows[0];
+
+    if (deletedGig.band_id !== null) {
+      void (async () => {
+        try {
+          const recipientsResult = await pool.query(
+            `
+              SELECT DISTINCT
+                bmp.user_id,
+                b.name AS band_name,
+                deleter.name AS deleter_name
+              FROM band_member_periods bmp
+              JOIN bands b
+                ON b.id = bmp.band_id
+              JOIN users deleter
+                ON deleter.id = $2
+              WHERE bmp.band_id = $1
+                AND bmp.user_id <> $2
+                AND ($3::date + $4::time) >= bmp.joined_at
+                AND (
+                  bmp.left_at IS NULL
+                  OR ($3::date + $4::time) <= bmp.left_at
+                )
+            `,
+            [
+              deletedGig.band_id,
+              userId,
+              deletedGig.date,
+              deletedGig.time,
+            ],
+          );
+
+          const userIds = recipientsResult.rows.map(
+            (row) => Number(row.user_id),
+          );
+
+          if (userIds.length > 0) {
+            const bandName = recipientsResult.rows[0].band_name;
+            const deleterName =
+              recipientsResult.rows[0].deleter_name || "Un integrante";
+
+            await sendPushToUsers({
+              userIds,
+              title: `Tocada cancelada · ${bandName}`,
+              body: `${deleterName} eliminó "${deletedGig.title}".`,
+              data: {
+                type: "gig_deleted",
+                gigId: deletedGig.id,
+                bandId: Number(deletedGig.band_id),
+              },
+            });
+          }
+        } catch (notificationError) {
+          console.error(
+            "Error al preparar notificación de tocada eliminada:",
+            notificationError,
+          );
+        }
+      })();
+    }
+
     return res.json({ ok: true });
   } catch (error: any) {
+    console.error("Error al eliminar tocada:", error);
     return res.status(500).json({ error: error.message });
   }
 };
