@@ -375,7 +375,17 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
       : Number(band_id);
 
   const currentGigResult = await pool.query(
-    `SELECT band_id
+    `SELECT
+       band_id,
+       title,
+       place,
+       date,
+       time,
+       hours,
+       location_address,
+       latitude,
+       longitude,
+       google_place_id
    FROM gigs
    WHERE id = $1
      AND (
@@ -481,7 +491,125 @@ RETURNING *
       });
     }
 
-    return res.json(result.rows[0]);
+    const updatedGig = result.rows[0];
+    const previousGig = currentGigResult.rows[0];
+
+    const normalizeDate = (value: unknown) => {
+      if (value instanceof Date) {
+        return value.toISOString().slice(0, 10);
+      }
+
+      return String(value ?? "").slice(0, 10);
+    };
+
+    const normalizeTime = (value: unknown) =>
+      String(value ?? "").slice(0, 5);
+
+    const normalizeText = (value: unknown) =>
+      String(value ?? "").trim();
+
+    const normalizeNumber = (value: unknown) => {
+      if (value === null || value === undefined || value === "") {
+        return null;
+      }
+
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+
+    const importantChange =
+      currentBandId !== normalizedBandId ||
+      normalizeDate(previousGig.date) !== normalizeDate(updatedGig.date) ||
+      normalizeTime(previousGig.time) !== normalizeTime(updatedGig.time) ||
+      normalizeText(previousGig.place) !== normalizeText(updatedGig.place) ||
+      normalizeNumber(previousGig.hours) !== normalizeNumber(updatedGig.hours) ||
+      normalizeText(previousGig.location_address) !==
+        normalizeText(updatedGig.location_address) ||
+      normalizeNumber(previousGig.latitude) !==
+        normalizeNumber(updatedGig.latitude) ||
+      normalizeNumber(previousGig.longitude) !==
+        normalizeNumber(updatedGig.longitude) ||
+      normalizeText(previousGig.google_place_id) !==
+        normalizeText(updatedGig.google_place_id);
+
+    if (importantChange) {
+      void (async () => {
+        try {
+          const affectedBandIds = [
+            currentBandId,
+            normalizedBandId,
+          ].filter(
+            (bandId): bandId is number => bandId !== null,
+          );
+
+          if (affectedBandIds.length === 0) {
+            return;
+          }
+
+          const recipientsResult = await pool.query(
+            `
+              SELECT DISTINCT bmp.user_id
+              FROM band_member_periods bmp
+              WHERE bmp.band_id = ANY($1::int[])
+                AND bmp.user_id <> $2
+                AND (
+                  (
+                    bmp.band_id = $3
+                    AND ($4::date + $5::time) >= bmp.joined_at
+                    AND (
+                      bmp.left_at IS NULL
+                      OR ($4::date + $5::time) <= bmp.left_at
+                    )
+                  )
+                  OR
+                  (
+                    bmp.band_id = $6
+                    AND ($7::date + $8::time) >= bmp.joined_at
+                    AND (
+                      bmp.left_at IS NULL
+                      OR ($7::date + $8::time) <= bmp.left_at
+                    )
+                  )
+                )
+            `,
+            [
+              affectedBandIds,
+              userId,
+              currentBandId,
+              previousGig.date,
+              previousGig.time,
+              normalizedBandId,
+              updatedGig.date,
+              updatedGig.time,
+            ],
+          );
+
+          const userIds = recipientsResult.rows.map(
+            (row) => Number(row.user_id),
+          );
+
+          if (userIds.length > 0) {
+            await sendPushToUsers({
+              userIds,
+              title: "Tocada actualizada",
+              body: `Se modificaron datos importantes de "${updatedGig.title}".`,
+              data: {
+                type: "gig_updated",
+                gigId: updatedGig.id,
+                bandId: normalizedBandId,
+              },
+            });
+          }
+        } catch (notificationError) {
+          console.error(
+            "Error al preparar notificación de tocada actualizada:",
+            notificationError,
+          );
+        }
+      })();
+    }
+
+    return res.json(updatedGig);
   } catch (error: any) {
     console.error("Error al actualizar tocada:", error);
 
