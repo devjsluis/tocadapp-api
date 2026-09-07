@@ -93,7 +93,7 @@ async function checkReminder(
             AND bmp.band_id = ug.band_id
             AND (
               ug.gig_date::date + ug.gig_time::time
-            ) >= bmp.joined_at
+            ) AT TIME ZONE $1 >= bmp.joined_at
             AND (
               bmp.left_at IS NULL
               OR (
