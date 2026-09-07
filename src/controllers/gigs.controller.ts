@@ -251,14 +251,9 @@ notes,
             [normalizedBandId, userId, date, time],
           );
 
-          const userIds = recipientsResult.rows.map(
-            (row) => Number(row.user_id),
+          const userIds = recipientsResult.rows.map((row) =>
+            Number(row.user_id),
           );
-
-          console.log("DELETE PUSH - destinatarios:", {
-            rows: recipientsResult.rows,
-            userIds,
-          });
 
           if (userIds.length > 0) {
             const bandName = recipientsResult.rows[0].band_name;
@@ -507,11 +502,9 @@ RETURNING *
       return String(value ?? "").slice(0, 10);
     };
 
-    const normalizeTime = (value: unknown) =>
-      String(value ?? "").slice(0, 5);
+    const normalizeTime = (value: unknown) => String(value ?? "").slice(0, 5);
 
-    const normalizeText = (value: unknown) =>
-      String(value ?? "").trim();
+    const normalizeText = (value: unknown) => String(value ?? "").trim();
 
     const normalizeNumber = (value: unknown) => {
       if (value === null || value === undefined || value === "") {
@@ -527,7 +520,8 @@ RETURNING *
       normalizeDate(previousGig.date) !== normalizeDate(updatedGig.date) ||
       normalizeTime(previousGig.time) !== normalizeTime(updatedGig.time) ||
       normalizeText(previousGig.place) !== normalizeText(updatedGig.place) ||
-      normalizeNumber(previousGig.hours) !== normalizeNumber(updatedGig.hours) ||
+      normalizeNumber(previousGig.hours) !==
+        normalizeNumber(updatedGig.hours) ||
       normalizeText(previousGig.location_address) !==
         normalizeText(updatedGig.location_address) ||
       normalizeNumber(previousGig.latitude) !==
@@ -540,10 +534,7 @@ RETURNING *
     if (importantChange) {
       void (async () => {
         try {
-          const affectedBandIds = [
-            currentBandId,
-            normalizedBandId,
-          ].filter(
+          const affectedBandIds = [currentBandId, normalizedBandId].filter(
             (bandId): bandId is number => bandId !== null,
           );
 
@@ -589,8 +580,8 @@ RETURNING *
             ],
           );
 
-          const userIds = recipientsResult.rows.map(
-            (row) => Number(row.user_id),
+          const userIds = recipientsResult.rows.map((row) =>
+            Number(row.user_id),
           );
 
           if (userIds.length > 0) {
@@ -741,15 +732,6 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
 
     const deletedGig = result.rows[0];
 
-    console.log("DELETE PUSH - tocada eliminada:", {
-      id: deletedGig.id,
-      title: deletedGig.title,
-      band_id: deletedGig.band_id,
-      date: deletedGig.date,
-      time: deletedGig.time,
-      actor: userId,
-    });
-
     if (deletedGig.band_id !== null) {
       void (async () => {
         try {
@@ -772,16 +754,11 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
                   OR ($3::date + $4::time) <= bmp.left_at
                 )
             `,
-            [
-              deletedGig.band_id,
-              userId,
-              deletedGig.date,
-              deletedGig.time,
-            ],
+            [deletedGig.band_id, userId, deletedGig.date, deletedGig.time],
           );
 
-          const userIds = recipientsResult.rows.map(
-            (row) => Number(row.user_id),
+          const userIds = recipientsResult.rows.map((row) =>
+            Number(row.user_id),
           );
 
           if (userIds.length > 0) {
