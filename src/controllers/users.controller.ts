@@ -697,6 +697,18 @@ export const deleteAccount = async (req: AuthRequest, res: Response) => {
       [anonymousEmail, unusablePassword, userId],
     );
 
+    // La cuenta se anonimiza en lugar de eliminar físicamente la fila de users,
+    // por lo que ON DELETE CASCADE no se ejecuta. Eliminamos explícitamente
+    // todos los dispositivos registrados para que la cuenta eliminada
+    // no pueda seguir recibiendo notificaciones.
+    await client.query(
+      `
+        DELETE FROM user_push_tokens
+        WHERE user_id = $1
+      `,
+      [userId],
+    );
+
     await client.query("COMMIT");
 
     return res.json({

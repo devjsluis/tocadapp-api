@@ -1,6 +1,7 @@
 import "dotenv/config";
 import app from "./app";
 import { checkGigReminders } from "./services/gigReminders.service";
+import { checkPushReceipts } from "./services/pushNotifications.service";
 
 const PORT = Number(process.env.PORT) || 4000;
 const HOST = "0.0.0.0";
@@ -16,5 +17,13 @@ app.listen(PORT, HOST, () => {
 
   setInterval(() => {
     void checkGigReminders();
+  }, FIVE_MINUTES);
+
+  setTimeout(() => {
+    void checkPushReceipts();
+  }, 30_000);
+
+  setInterval(() => {
+    void checkPushReceipts();
   }, FIVE_MINUTES);
 });

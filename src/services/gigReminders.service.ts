@@ -147,7 +147,7 @@ async function checkReminder(
     );
 
     try {
-      await sendPushToUsers({
+      const acceptedUserIds = await sendPushToUsers({
         userIds,
         title: config.title,
         body: config.buildBody(first),
@@ -158,7 +158,17 @@ async function checkReminder(
         },
       });
 
+      if (acceptedUserIds.size === 0) {
+        console.error(
+          `${config.notificationType} no fue aceptado por Expo para tocada ${gigId}`,
+        );
+        continue;
+      }
+
       for (const row of rows) {
+        if (!acceptedUserIds.has(Number(row.user_id))) {
+          continue;
+        }
         await pool.query(
           `
             INSERT INTO gig_notification_deliveries (
@@ -182,7 +192,7 @@ async function checkReminder(
       }
 
       console.log(
-        `${config.notificationType} enviado para tocada ${gigId} a ${userIds.length} usuario(s)`,
+        `${config.notificationType} aceptado por Expo para tocada ${gigId} a ${acceptedUserIds.size} usuario(s)`,
       );
     } catch (error) {
       console.error(
@@ -279,7 +289,7 @@ async function checkPendingPayments(): Promise<void> {
 
   for (const row of result.rows) {
     try {
-      await sendPushToUsers({
+      const acceptedUserIds = await sendPushToUsers({
         userIds: [Number(row.user_id)],
         title: "Cobro pendiente",
         body: `Aún no has registrado el cobro de "${row.title}".`,
@@ -289,6 +299,13 @@ async function checkPendingPayments(): Promise<void> {
           bandId: row.band_id,
         },
       });
+
+      if (!acceptedUserIds.has(Number(row.user_id))) {
+        console.error(
+          `${notificationType} no fue aceptado por Expo para tocada ${row.gig_id} y usuario ${row.user_id}`,
+        );
+        continue;
+      }
 
       await pool.query(
         `
