@@ -22,9 +22,24 @@ const sendVerificationEmail = async (
   name: string,
   rawToken: string,
 ) => {
-  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+  const frontendUrl = process.env.FRONTEND_URL;
 
-  const verificationLink = `${frontendUrl}/verify-email?token=${encodeURIComponent(rawToken)}`;
+  if (!frontendUrl) {
+    throw new Error("FRONTEND_URL no está configurada");
+  }
+
+  const frontendHostname = new URL(frontendUrl).hostname;
+  const isLocalFrontend = ["localhost", "127.0.0.1", "::1"].includes(
+    frontendHostname,
+  );
+
+  if (process.env.NODE_ENV === "production" && isLocalFrontend) {
+    throw new Error(
+      "FRONTEND_URL no puede apuntar a localhost en producción",
+    );
+  }
+
+  const verificationLink = `${frontendUrl.replace(/\/$/, "")}/verify-email?token=${encodeURIComponent(rawToken)}`;
 
   await axios.post(
     "https://api.brevo.com/v3/smtp/email",

@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { pool } from "../lib/db";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import axios from "axios";
 import { AuthRequest } from "../middleware/auth";
 import { JWT_SECRET, JWT_REFRESH_SECRET } from "../lib/authConfig";
@@ -439,6 +439,7 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
     const user = result.rows[0];
     const token = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
     await pool.query(
@@ -448,17 +449,34 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
     await pool.query(
       "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [user.id, token, expiresAt],
+      [user.id, tokenHash, expiresAt],
     );
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const frontendUrl = process.env.FRONTEND_URL;
 
-    const mobileAppUrl = process.env.MOBILE_APP_URL || "tocadapp://";
+    if (!frontendUrl) {
+      throw new Error("FRONTEND_URL no está configurada");
+    }
 
-    const resetTarget =
-      process.env.PASSWORD_RESET_TARGET === "mobile"
-        ? mobileAppUrl
-        : frontendUrl;
+    const frontendHostname = new URL(frontendUrl).hostname;
+    const isLocalFrontend = ["localhost", "127.0.0.1", "::1"].includes(
+      frontendHostname,
+    );
+
+    if (process.env.NODE_ENV === "production" && isLocalFrontend) {
+      throw new Error(
+        "FRONTEND_URL no puede apuntar a localhost en producción",
+      );
+    }
+
+    const useMobileReset = process.env.PASSWORD_RESET_TARGET === "mobile";
+    const mobileAppUrl = process.env.MOBILE_APP_URL;
+
+    if (useMobileReset && !mobileAppUrl) {
+      throw new Error("MOBILE_APP_URL no está configurada");
+    }
+
+    const resetTarget = useMobileReset ? mobileAppUrl! : frontendUrl;
 
     const resetLink = `${resetTarget.replace(/\/$/, "")}/reset-password?token=${token}`;
 
@@ -517,14 +535,21 @@ export const resetPassword = async (req: Request, res: Response) => {
   try {
     await client.query("BEGIN");
 
+    const tokenHash = createHash("sha256")
+      .update(String(token))
+      .digest("hex");
+
     const result = await client.query(
       `
         SELECT id, user_id, expires_at, used
         FROM password_reset_tokens
         WHERE token = $1
+           OR token = $2
+        ORDER BY CASE WHEN token = $1 THEN 0 ELSE 1 END
+        LIMIT 1
         FOR UPDATE
       `,
-      [token],
+      [tokenHash, token],
     );
 
     if (result.rowCount === 0) {
