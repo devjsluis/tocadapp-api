@@ -544,12 +544,10 @@ export const resetPassword = async (req: Request, res: Response) => {
         SELECT id, user_id, expires_at, used
         FROM password_reset_tokens
         WHERE token = $1
-           OR token = $2
-        ORDER BY CASE WHEN token = $1 THEN 0 ELSE 1 END
         LIMIT 1
         FOR UPDATE
       `,
-      [tokenHash, token],
+      [tokenHash],
     );
 
     if (result.rowCount === 0) {
