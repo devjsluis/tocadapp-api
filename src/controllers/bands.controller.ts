@@ -187,21 +187,43 @@ export const getBandMembers = async (req: AuthRequest, res: Response) => {
 
   try {
     const memberCheck = await pool.query(
-      "SELECT id FROM band_members WHERE band_id = $1 AND user_id = $2",
+      `SELECT
+         bm.id,
+         (b.owner_id = $2) AS is_owner
+       FROM band_members bm
+       JOIN bands b
+         ON b.id = bm.band_id
+       WHERE bm.band_id = $1
+         AND bm.user_id = $2`,
       [id, userId],
     );
+
     if (memberCheck.rowCount === 0) {
       return res.status(403).json({ error: "No eres miembro de esta banda" });
     }
 
+    const isOwner = memberCheck.rows[0].is_owner === true;
+
     const result = await pool.query(
-      `SELECT u.id, u.name, u.last_name, u.email, bm.role, bm.joined_at, bm.can_create_gigs
+      `SELECT
+         u.id,
+         u.name,
+         u.last_name,
+         CASE
+           WHEN $2::boolean THEN u.email
+           ELSE NULL
+         END AS email,
+         bm.role,
+         bm.joined_at,
+         bm.can_create_gigs
        FROM band_members bm
-       JOIN users u ON bm.user_id = u.id
+       JOIN users u
+         ON bm.user_id = u.id
        WHERE bm.band_id = $1
        ORDER BY bm.role DESC, u.name ASC`,
-      [id],
+      [id, isOwner],
     );
+
     return res.json({ ok: true, data: result.rows });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
