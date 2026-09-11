@@ -18,6 +18,11 @@ import {
 } from "../controllers/pushTokens.controller";
 import { requireAdmin } from "../middleware/requireAdmin";
 import {
+  loginRateLimiter,
+  emailActionRateLimiter,
+  resetPasswordRateLimiter,
+} from "../middleware/authRateLimit";
+import {
   resendEmailVerification,
   verifyEmail,
 } from "../controllers/emailVerification.controller";
@@ -32,11 +37,11 @@ router.post("/push-token", authMiddleware, registerPushToken);
 router.delete("/push-token", authMiddleware, deletePushToken);
 router.get("/", authMiddleware, requireAdmin, getUsers);
 router.post("/", createUser);
-router.post("/login", loginUser);
+router.post("/login", loginRateLimiter, loginUser);
 router.post("/refresh", refreshAccessToken);
 router.post("/verify-email", verifyEmail);
-router.post("/resend-verification", resendEmailVerification);
-router.post("/forgot-password", forgotPassword);
-router.post("/reset-password", resetPassword);
+router.post("/resend-verification", emailActionRateLimiter, resendEmailVerification);
+router.post("/forgot-password", emailActionRateLimiter, forgotPassword);
+router.post("/reset-password", resetPasswordRateLimiter, resetPassword);
 
 export default router;

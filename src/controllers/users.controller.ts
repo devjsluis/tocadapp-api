@@ -208,7 +208,10 @@ export const loginUser = async (req: Request, res: Response) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(401).json({ error: "El correo electrónico no existe" });
+      return res.status(401).json({
+        error: "Correo o contraseña incorrectos",
+        code: "INVALID_CREDENTIALS",
+      });
     }
 
     const user = result.rows[0];
@@ -217,7 +220,8 @@ export const loginUser = async (req: Request, res: Response) => {
 
     if (!validPassword) {
       return res.status(401).json({
-        error: "Contraseña incorrecta",
+        error: "Correo o contraseña incorrectos",
+        code: "INVALID_CREDENTIALS",
       });
     }
 
