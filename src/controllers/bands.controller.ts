@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { pool } from "../lib/db";
+import { APP_TIMEZONE } from "../lib/config";
 import { AuthRequest } from "../middleware/auth";
 
 function generateInviteCode(): string {
@@ -660,16 +661,16 @@ export const updateMemberPeriod = async (req: AuthRequest, res: Response) => {
       `SELECT g.id, g.title, g.date, g.time
    FROM gigs g
    WHERE g.band_id = $1
-     AND (g.date + g.time) >= ($2::timestamptz AT TIME ZONE 'UTC')
+     AND ((g.date + g.time) AT TIME ZONE $6) >= $2::timestamptz
      AND (
        $3::timestamptz IS NULL
-       OR (g.date + g.time) <= ($3::timestamptz AT TIME ZONE 'UTC')
+       OR ((g.date + g.time) AT TIME ZONE $6) <= $3::timestamptz
      )
      AND NOT (
-       (g.date + g.time) >= ($4::timestamptz AT TIME ZONE 'UTC')
+       ((g.date + g.time) AT TIME ZONE $6) >= $4::timestamptz
        AND (
          $5::timestamptz IS NULL
-         OR (g.date + g.time) <= ($5::timestamptz AT TIME ZONE 'UTC')
+         OR ((g.date + g.time) AT TIME ZONE $6) <= $5::timestamptz
        )
      )`,
       [
@@ -678,6 +679,7 @@ export const updateMemberPeriod = async (req: AuthRequest, res: Response) => {
         currentPeriod.left_at,
         parsedJoinedAt.toISOString(),
         parsedLeftAt?.toISOString() ?? null,
+        APP_TIMEZONE,
       ],
     );
 

@@ -1,8 +1,7 @@
 import { pool } from "../lib/db";
 import { sendPushToUsers } from "./pushNotifications.service";
 
-const APP_TIMEZONE =
-  process.env.APP_TIMEZONE || "America/Mexico_City";
+import { APP_TIMEZONE } from "../lib/config";
 
 type ReminderRow = {
   gig_id: number;

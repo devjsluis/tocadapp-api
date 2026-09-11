@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { pool } from "../lib/db";
+import { APP_TIMEZONE } from "../lib/config";
 import { AuthRequest } from "../middleware/auth";
 import { sendPushToUsers } from "../services/pushNotifications.service";
 
@@ -24,17 +25,17 @@ async function userCanAccessGig(
               FROM band_member_periods bmp
               WHERE bmp.band_id = g.band_id
                 AND bmp.user_id = $2
-                AND (g.date + g.time) >= bmp.joined_at
+                AND ((g.date + g.time) AT TIME ZONE $3) >= bmp.joined_at
                 AND (
                   bmp.left_at IS NULL
-                  OR (g.date + g.time) <= bmp.left_at
+                  OR ((g.date + g.time) AT TIME ZONE $3) <= bmp.left_at
                 )
             )
           )
         )
       LIMIT 1
     `,
-    [gigId, userId],
+    [gigId, userId, APP_TIMEZONE],
   );
 
   return (result.rowCount ?? 0) > 0;
@@ -91,15 +92,15 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
            FROM band_member_periods bmp
            WHERE bmp.band_id = g.band_id
              AND bmp.user_id = $1
-             AND (g.date + g.time) >= bmp.joined_at
+             AND ((g.date + g.time) AT TIME ZONE $2) >= bmp.joined_at
              AND (
                bmp.left_at IS NULL
-               OR (g.date + g.time) <= bmp.left_at
+               OR ((g.date + g.time) AT TIME ZONE $2) <= bmp.left_at
              )
          )
        )
        ORDER BY g.date ASC`,
-      [userId],
+      [userId, APP_TIMEZONE],
     );
     return res.json({
       ok: true,
