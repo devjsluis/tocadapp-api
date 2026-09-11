@@ -276,13 +276,13 @@ notes,
                 ON creator.id = $2
               WHERE bmp.band_id = $1
                 AND bmp.user_id <> $2
-                AND ($3::date + $4::time) >= bmp.joined_at
+                AND (($3::date + $4::time) AT TIME ZONE $5) >= bmp.joined_at
                 AND (
                   bmp.left_at IS NULL
-                  OR ($3::date + $4::time) <= bmp.left_at
+                  OR (($3::date + $4::time) AT TIME ZONE $5) <= bmp.left_at
                 )
             `,
-            [normalizedBandId, userId, date, time],
+            [normalizedBandId, userId, date, time, APP_TIMEZONE],
           );
 
           const userIds = recipientsResult.rows.map((row) =>
