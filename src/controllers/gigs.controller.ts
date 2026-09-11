@@ -13,7 +13,10 @@ async function userCanAccessGig(
       FROM gigs g
       WHERE g.id = $1
         AND (
-          g.user_id = $2
+          (
+            g.band_id IS NULL
+            AND g.user_id = $2
+          )
           OR (
             g.band_id IS NOT NULL
             AND EXISTS (
@@ -43,6 +46,33 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
     const result = await pool.query(
       `SELECT g.*, b.name AS band_name,
               (g.user_id = $1) AS is_owner,
+              (
+                (
+                  g.band_id IS NULL
+                  AND g.user_id = $1
+                )
+                OR (
+                  g.band_id IS NOT NULL
+                  AND (
+                    EXISTS (
+                      SELECT 1
+                      FROM bands manage_band
+                      WHERE manage_band.id = g.band_id
+                        AND manage_band.owner_id = $1
+                    )
+                    OR (
+                      g.user_id = $1
+                      AND EXISTS (
+                        SELECT 1
+                        FROM band_members manage_member
+                        WHERE manage_member.band_id = g.band_id
+                          AND manage_member.user_id = $1
+                          AND manage_member.can_create_gigs = TRUE
+                      )
+                    )
+                  )
+                )
+              ) AS can_manage,
               ge.amount AS my_amount,
               ge.collected_amount AS my_collected,
               ga.attending AS my_attending
@@ -50,22 +80,25 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
        LEFT JOIN bands b ON g.band_id = b.id
        LEFT JOIN gig_earnings ge ON ge.gig_id = g.id AND ge.user_id = $1
        LEFT JOIN gig_attendance ga ON ga.gig_id = g.id AND ga.user_id = $1
-       WHERE g.user_id = $1
-          OR (
-            g.band_id IS NOT NULL
-            AND EXISTS (
-              SELECT 1
-              FROM band_member_periods bmp
-              WHERE bmp.band_id = g.band_id
-                AND bmp.user_id = $1
-                AND (g.date + g.time) >= bmp.joined_at
-                AND (
-                  bmp.left_at IS NULL
-                  OR (g.date + g.time) <= bmp.left_at
-                )
-            )
-          )
-        ORDER BY g.date ASC`,
+       WHERE (
+         g.band_id IS NULL
+         AND g.user_id = $1
+       )
+       OR (
+         g.band_id IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM band_member_periods bmp
+           WHERE bmp.band_id = g.band_id
+             AND bmp.user_id = $1
+             AND (g.date + g.time) >= bmp.joined_at
+             AND (
+               bmp.left_at IS NULL
+               OR (g.date + g.time) <= bmp.left_at
+             )
+         )
+       )
+       ORDER BY g.date ASC`,
       [userId],
     );
     return res.json({
@@ -389,13 +422,28 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
    FROM gigs
    WHERE id = $1
      AND (
-       user_id = $2
+       (
+         band_id IS NULL
+         AND user_id = $2
+       )
        OR (
          band_id IS NOT NULL
-         AND band_id IN (
-           SELECT id
-           FROM bands
-           WHERE owner_id = $2
+         AND (
+           band_id IN (
+             SELECT id
+             FROM bands
+             WHERE owner_id = $2
+           )
+           OR (
+             user_id = $2
+             AND EXISTS (
+               SELECT 1
+               FROM band_members bm
+               WHERE bm.band_id = gigs.band_id
+                 AND bm.user_id = $2
+                 AND bm.can_create_gigs = TRUE
+             )
+           )
          )
        )
      )`,
@@ -453,13 +501,28 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   google_place_id = $13
 WHERE id = $14
   AND (
-    user_id = $15
+    (
+      band_id IS NULL
+      AND user_id = $15
+    )
     OR (
       band_id IS NOT NULL
-      AND band_id IN (
-        SELECT id
-        FROM bands
-        WHERE owner_id = $15
+      AND (
+        band_id IN (
+          SELECT id
+          FROM bands
+          WHERE owner_id = $15
+        )
+        OR (
+          user_id = $15
+          AND EXISTS (
+            SELECT 1
+            FROM band_members bm
+            WHERE bm.band_id = gigs.band_id
+              AND bm.user_id = $15
+              AND bm.can_create_gigs = TRUE
+          )
+        )
       )
     )
   )
@@ -650,22 +713,38 @@ export const setMyEarnings = async (req: AuthRequest, res: Response) => {
 };
 
 export const setCollected = async (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
+  const id = Number(req.params.id);
   const { amount } = req.body;
   const userId = req.user!.id;
 
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({
+      error: "Tocada inválida",
+    });
+  }
+
   try {
+    const canAccess = await userCanAccessGig(userId, id);
+
+    if (!canAccess) {
+      return res
+        .status(404)
+        .json({ error: "Tocada no encontrada o no autorizado" });
+    }
+
     const result = await pool.query(
       `UPDATE gigs SET collected_amount = $1
        WHERE id = $2 AND user_id = $3
        RETURNING id, collected_amount`,
       [amount ?? null, id, userId],
     );
+
     if (result.rowCount === 0) {
       return res
         .status(404)
         .json({ error: "Tocada no encontrada o no autorizado" });
     }
+
     return res.json({ ok: true, data: result.rows[0] });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
@@ -718,9 +797,34 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
 
   try {
     const result = await pool.query(
-      `DELETE FROM gigs WHERE id=$1
-       AND (user_id=$2
-            OR (band_id IS NOT NULL AND band_id IN (SELECT id FROM bands WHERE owner_id = $2)))
+      `DELETE FROM gigs
+       WHERE id = $1
+         AND (
+           (
+             band_id IS NULL
+             AND user_id = $2
+           )
+           OR (
+             band_id IS NOT NULL
+             AND (
+               band_id IN (
+                 SELECT id
+                 FROM bands
+                 WHERE owner_id = $2
+               )
+               OR (
+                 user_id = $2
+                 AND EXISTS (
+                   SELECT 1
+                   FROM band_members bm
+                   WHERE bm.band_id = gigs.band_id
+                     AND bm.user_id = $2
+                     AND bm.can_create_gigs = TRUE
+                 )
+               )
+             )
+           )
+         )
        RETURNING *`,
       [id, userId],
     );
