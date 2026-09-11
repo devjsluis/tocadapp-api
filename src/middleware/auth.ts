@@ -2,12 +2,12 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
 import { pool } from "../lib/db";
+import { JWT_SECRET } from "../lib/authConfig";
 
 export interface AuthRequest extends Request {
   user?: { id: number; email: string; role: string };
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO";
 
 export async function authMiddleware(
   req: AuthRequest,
@@ -29,16 +29,17 @@ export async function authMiddleware(
       email: string;
       role: string;
       type?: string;
+      sessionVersion?: number;
     };
 
-    if (decoded.type && decoded.type !== "access") {
+    if (decoded.type !== "access") {
       res.status(401).json({ error: "Token inválido" });
       return;
     }
 
     const result = await pool.query(
       `
-        SELECT id, email, role
+        SELECT id, email, role, session_version
         FROM users
         WHERE id = $1
           AND deleted_at IS NULL
@@ -56,6 +57,14 @@ export async function authMiddleware(
     }
 
     const user = result.rows[0];
+
+    if (decoded.sessionVersion !== user.session_version) {
+      res.status(401).json({
+        error: "La sesión ya no es válida",
+        code: "SESSION_REVOKED",
+      });
+      return;
+    }
 
     req.user = {
       id: user.id,

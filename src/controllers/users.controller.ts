@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
 import axios from "axios";
 import { AuthRequest } from "../middleware/auth";
+import { JWT_SECRET, JWT_REFRESH_SECRET } from "../lib/authConfig";
 import {
   createEmailVerificationToken,
   sendEmailVerification,
@@ -228,19 +229,15 @@ export const loginUser = async (req: Request, res: Response) => {
       });
     }
 
-    const jwtSecret = process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO";
-
-    const jwtRefreshSecret =
-      process.env.JWT_REFRESH_SECRET || "TU_SECRETO_REFRESH_SUPER_SECRETO";
-
     const token = jwt.sign(
       {
         id: user.id,
         email: user.email,
         role: user.role,
+        sessionVersion: user.session_version,
         type: "access",
       },
-      jwtSecret,
+      JWT_SECRET,
       {
         expiresIn: "30m",
       },
@@ -251,9 +248,10 @@ export const loginUser = async (req: Request, res: Response) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        sessionVersion: user.session_version,
         type: "refresh",
       },
-      jwtRefreshSecret,
+      JWT_REFRESH_SECRET,
       {
         expiresIn: "30d",
       },
@@ -284,17 +282,13 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
     });
   }
 
-  const jwtSecret = process.env.JWT_SECRET || "TU_SECRETO_SUPER_SECRETO";
-
-  const jwtRefreshSecret =
-    process.env.JWT_REFRESH_SECRET || "TU_SECRETO_REFRESH_SUPER_SECRETO";
-
   try {
-    const decoded = jwt.verify(refreshToken, jwtRefreshSecret) as {
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as {
       id: number;
       email: string;
       role: string;
       type?: string;
+      sessionVersion?: number;
     };
 
     if (decoded.type !== "refresh") {
@@ -309,7 +303,8 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
           id,
           email,
           role,
-          email_verified_at
+          email_verified_at,
+          session_version
         FROM users
         WHERE id = $1
           AND deleted_at IS NULL
@@ -326,6 +321,13 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
 
     const user = result.rows[0];
 
+    if (decoded.sessionVersion !== user.session_version) {
+      return res.status(401).json({
+        error: "La sesión ya no es válida",
+        code: "SESSION_REVOKED",
+      });
+    }
+
     if (!user.email_verified_at) {
       return res.status(403).json({
         error: "Correo no verificado",
@@ -338,9 +340,10 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        sessionVersion: user.session_version,
         type: "access",
       },
-      jwtSecret,
+      JWT_SECRET,
       {
         expiresIn: "30m",
       },
@@ -505,23 +508,35 @@ export const resetPassword = async (req: Request, res: Response) => {
       .json({ error: "La contraseña debe tener al menos 6 caracteres" });
   }
 
+  const client = await pool.connect();
+
   try {
-    const result = await pool.query(
-      "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token = $1",
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `
+        SELECT id, user_id, expires_at, used
+        FROM password_reset_tokens
+        WHERE token = $1
+        FOR UPDATE
+      `,
       [token],
     );
 
     if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "El enlace no es válido" });
     }
 
     const resetToken = result.rows[0];
 
     if (resetToken.used) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "Este enlace ya fue utilizado" });
     }
 
     if (new Date() > new Date(resetToken.expires_at)) {
+      await client.query("ROLLBACK");
       return res
         .status(400)
         .json({ error: "El enlace ha expirado. Solicita uno nuevo" });
@@ -529,20 +544,42 @@ export const resetPassword = async (req: Request, res: Response) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    await pool.query("UPDATE users SET password = $1 WHERE id = $2", [
-      hashedPassword,
-      resetToken.user_id,
-    ]);
-
-    await pool.query(
-      "UPDATE password_reset_tokens SET used = true WHERE id = $1",
-      [resetToken.id],
+    await client.query(
+      `
+        UPDATE users
+        SET
+          password = $1,
+          session_version = session_version + 1
+        WHERE id = $2
+      `,
+      [hashedPassword, resetToken.user_id],
     );
 
-    return res.json({ message: "Contraseña actualizada correctamente" });
+    await client.query(
+      `
+        UPDATE password_reset_tokens
+        SET used = true
+        WHERE user_id = $1
+          AND used = false
+      `,
+      [resetToken.user_id],
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      message: "Contraseña actualizada correctamente",
+    });
   } catch (error: any) {
+    await client.query("ROLLBACK");
+
     console.error("Error en resetPassword:", error);
-    return res.status(500).json({ error: "Error interno del servidor" });
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
+  } finally {
+    client.release();
   }
 };
 
@@ -592,10 +629,26 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await pool.query("UPDATE users SET password = $1 WHERE id = $2", [
-      hashedPassword,
-      userId,
-    ]);
+    await pool.query(
+      `
+        UPDATE users
+        SET
+          password = $1,
+          session_version = session_version + 1
+        WHERE id = $2
+      `,
+      [hashedPassword, userId],
+    );
+
+    await pool.query(
+      `
+        UPDATE password_reset_tokens
+        SET used = true
+        WHERE user_id = $1
+          AND used = false
+      `,
+      [userId],
+    );
 
     return res.json({
       ok: true,
