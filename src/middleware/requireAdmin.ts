@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 
-const ALLOWED_ADMIN_ROLES = ["admin", "leader"];
+const ALLOWED_ADMIN_ROLES = ["admin"];
 
 export const requireAdmin = (
   req: Request,
