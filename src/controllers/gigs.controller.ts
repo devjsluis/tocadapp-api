@@ -20,16 +20,24 @@ async function userCanAccessGig(
           )
           OR (
             g.band_id IS NOT NULL
-            AND EXISTS (
-              SELECT 1
-              FROM band_member_periods bmp
-              WHERE bmp.band_id = g.band_id
-                AND bmp.user_id = $2
-                AND ((g.date + g.time) AT TIME ZONE $3) >= bmp.joined_at
-                AND (
-                  bmp.left_at IS NULL
-                  OR ((g.date + g.time) AT TIME ZONE $3) <= bmp.left_at
-                )
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM bands access_band
+                WHERE access_band.id = g.band_id
+                  AND access_band.owner_id = $2
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM band_member_periods bmp
+                WHERE bmp.band_id = g.band_id
+                  AND bmp.user_id = $2
+                  AND ((g.date + g.time) AT TIME ZONE $3) >= bmp.joined_at
+                  AND (
+                    bmp.left_at IS NULL
+                    OR ((g.date + g.time) AT TIME ZONE $3) <= bmp.left_at
+                  )
+              )
             )
           )
         )
@@ -87,16 +95,24 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
        )
        OR (
          g.band_id IS NOT NULL
-         AND EXISTS (
-           SELECT 1
-           FROM band_member_periods bmp
-           WHERE bmp.band_id = g.band_id
-             AND bmp.user_id = $1
-             AND ((g.date + g.time) AT TIME ZONE $2) >= bmp.joined_at
-             AND (
-               bmp.left_at IS NULL
-               OR ((g.date + g.time) AT TIME ZONE $2) <= bmp.left_at
-             )
+         AND (
+           EXISTS (
+             SELECT 1
+             FROM bands access_band
+             WHERE access_band.id = g.band_id
+               AND access_band.owner_id = $1
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM band_member_periods bmp
+             WHERE bmp.band_id = g.band_id
+               AND bmp.user_id = $1
+               AND ((g.date + g.time) AT TIME ZONE $2) >= bmp.joined_at
+               AND (
+                 bmp.left_at IS NULL
+                 OR ((g.date + g.time) AT TIME ZONE $2) <= bmp.left_at
+               )
+           )
          )
        )
        ORDER BY g.date ASC`,
