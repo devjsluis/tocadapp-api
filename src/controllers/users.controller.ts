@@ -395,10 +395,30 @@ export const updateMe = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
   const { name, last_name, timezone } = req.body;
 
-  if (!name || !last_name) {
-    return res
-      .status(400)
-      .json({ error: "Nombre y apellido son obligatorios" });
+  const normalizedName =
+    name === undefined
+      ? undefined
+      : typeof name === "string"
+        ? name.trim()
+        : "";
+
+  const normalizedLastName =
+    last_name === undefined
+      ? undefined
+      : typeof last_name === "string"
+        ? last_name.trim()
+        : "";
+
+  if (normalizedName !== undefined && !normalizedName) {
+    return res.status(400).json({
+      error: "El nombre no puede estar vacío",
+    });
+  }
+
+  if (normalizedLastName !== undefined && !normalizedLastName) {
+    return res.status(400).json({
+      error: "El apellido no puede estar vacío",
+    });
   }
 
   let normalizedTimezone: string | undefined;
@@ -426,13 +446,23 @@ export const updateMe = async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
       `UPDATE users
-       SET name = $1,
-           last_name = $2,
+       SET name = COALESCE($1, name),
+           last_name = COALESCE($2, last_name),
            timezone = COALESCE($3, timezone)
        WHERE id = $4
        RETURNING id, email, name, last_name, role, timezone`,
-      [name, last_name, normalizedTimezone ?? null, userId],
+      [
+        normalizedName ?? null,
+        normalizedLastName ?? null,
+        normalizedTimezone ?? null,
+        userId,
+      ],
     );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
     return res.json(result.rows[0]);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
