@@ -374,6 +374,7 @@ export const getMe = async (req: AuthRequest, res: Response) => {
       name,
       last_name,
       role,
+      timezone,
       email_verified_at,
       created_at
     FROM users
@@ -392,7 +393,7 @@ export const getMe = async (req: AuthRequest, res: Response) => {
 
 export const updateMe = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const { name, last_name } = req.body;
+  const { name, last_name, timezone } = req.body;
 
   if (!name || !last_name) {
     return res
@@ -400,10 +401,37 @@ export const updateMe = async (req: AuthRequest, res: Response) => {
       .json({ error: "Nombre y apellido son obligatorios" });
   }
 
+  let normalizedTimezone: string | undefined;
+
+  if (timezone !== undefined) {
+    if (typeof timezone !== "string" || !timezone.trim()) {
+      return res.status(400).json({
+        error: "La zona horaria no es válida",
+      });
+    }
+
+    normalizedTimezone = timezone.trim();
+
+    try {
+      new Intl.DateTimeFormat("es-MX", {
+        timeZone: normalizedTimezone,
+      }).format();
+    } catch {
+      return res.status(400).json({
+        error: "La zona horaria no es válida",
+      });
+    }
+  }
+
   try {
     const result = await pool.query(
-      "UPDATE users SET name=$1, last_name=$2 WHERE id=$3 RETURNING id, email, name, last_name, role",
-      [name, last_name, userId],
+      `UPDATE users
+       SET name = $1,
+           last_name = $2,
+           timezone = COALESCE($3, timezone)
+       WHERE id = $4
+       RETURNING id, email, name, last_name, role, timezone`,
+      [name, last_name, normalizedTimezone ?? null, userId],
     );
     return res.json(result.rows[0]);
   } catch (error: any) {

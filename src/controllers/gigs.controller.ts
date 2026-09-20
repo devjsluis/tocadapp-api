@@ -32,10 +32,10 @@ async function userCanAccessGig(
                 FROM band_member_periods bmp
                 WHERE bmp.band_id = g.band_id
                   AND bmp.user_id = $2
-                  AND ((g.date + g.time) AT TIME ZONE $3) >= bmp.joined_at
+                  AND ((g.date + g.time) AT TIME ZONE g.timezone) >= bmp.joined_at
                   AND (
                     bmp.left_at IS NULL
-                    OR ((g.date + g.time) AT TIME ZONE $3) <= bmp.left_at
+                    OR ((g.date + g.time) AT TIME ZONE g.timezone) <= bmp.left_at
                   )
               )
             )
@@ -43,7 +43,7 @@ async function userCanAccessGig(
         )
       LIMIT 1
     `,
-    [gigId, userId, APP_TIMEZONE],
+    [gigId, userId],
   );
 
   return (result.rowCount ?? 0) > 0;
@@ -54,6 +54,7 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
       `SELECT g.*, b.name AS band_name,
+              ((g.date + g.time) AT TIME ZONE g.timezone) AS starts_at,
               (g.user_id = $1) AS is_owner,
               (
                 (
@@ -107,16 +108,17 @@ export const getGigs = async (req: AuthRequest, res: Response) => {
              FROM band_member_periods bmp
              WHERE bmp.band_id = g.band_id
                AND bmp.user_id = $1
-               AND ((g.date + g.time) AT TIME ZONE $2) >= bmp.joined_at
+               AND ((g.date + g.time) AT TIME ZONE g.timezone) >= bmp.joined_at
                AND (
                  bmp.left_at IS NULL
-                 OR ((g.date + g.time) AT TIME ZONE $2) <= bmp.left_at
+                 OR ((g.date + g.time) AT TIME ZONE g.timezone) <= bmp.left_at
                )
            )
          )
        )
-       ORDER BY g.date ASC`,
-      [userId, APP_TIMEZONE],
+       ORDER BY
+         ((g.date + g.time) AT TIME ZONE g.timezone) ASC`,
+      [userId],
     );
     return res.json({
       ok: true,
@@ -143,9 +145,35 @@ export const createGig = async (req: AuthRequest, res: Response) => {
     latitude,
     longitude,
     google_place_id,
+    timezone,
   } = req.body;
 
   const userId = req.user!.id;
+
+  const timezoneResult = await pool.query<{ timezone: string }>(
+    "SELECT timezone FROM users WHERE id = $1",
+    [userId],
+  );
+
+  const requestedTimezone =
+    typeof timezone === "string" ? timezone.trim() : "";
+
+  if (requestedTimezone) {
+    try {
+      new Intl.DateTimeFormat("es-MX", {
+        timeZone: requestedTimezone,
+      }).format();
+    } catch {
+      return res.status(400).json({
+        error: "La zona horaria no es válida",
+      });
+    }
+  }
+
+  const gigTimezone =
+    requestedTimezone ||
+    timezoneResult.rows[0]?.timezone ||
+    APP_TIMEZONE;
 
   const parsedHours = Number(hours);
 
@@ -247,11 +275,12 @@ notes,
       location_address,
       latitude,
       longitude,
-      google_place_id
+      google_place_id,
+      timezone
     )
     VALUES (
   $1, $2, $3, $4, $5, $6, $7,
-  $8, $9, $10, $11, $12, $13, $14
+  $8, $9, $10, $11, $12, $13, $14, $15
 )
     RETURNING *
   `;
@@ -272,6 +301,7 @@ notes,
       parsedLatitude,
       parsedLongitude,
       google_place_id?.trim() || null,
+      gigTimezone,
     ]);
 
     const createdGig = result.rows[0];
@@ -298,7 +328,7 @@ notes,
                   OR (($3::date + $4::time) AT TIME ZONE $5) <= bmp.left_at
                 )
             `,
-            [normalizedBandId, userId, date, time, APP_TIMEZONE],
+            [normalizedBandId, userId, date, time, gigTimezone],
           );
 
           const userIds = recipientsResult.rows.map((row) =>
@@ -356,8 +386,24 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
     latitude,
     longitude,
     google_place_id,
+    timezone,
   } = req.body;
   const userId = req.user!.id;
+
+  const requestedTimezone =
+    typeof timezone === "string" ? timezone.trim() : "";
+
+  if (requestedTimezone) {
+    try {
+      new Intl.DateTimeFormat("es-MX", {
+        timeZone: requestedTimezone,
+      }).format();
+    } catch {
+      return res.status(400).json({
+        error: "La zona horaria no es válida",
+      });
+    }
+  }
 
   const parsedHours = Number(hours);
 
@@ -435,7 +481,8 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
        location_address,
        latitude,
        longitude,
-       google_place_id
+       google_place_id,
+       timezone
    FROM gigs
    WHERE id = $1
      AND (
@@ -515,12 +562,13 @@ export const updateGig = async (req: AuthRequest, res: Response) => {
   location_address = $10,
   latitude = $11,
   longitude = $12,
-  google_place_id = $13
-WHERE id = $14
+  google_place_id = $13,
+  timezone = COALESCE(NULLIF($14, ''), timezone)
+WHERE id = $15
   AND (
     (
       band_id IS NULL
-      AND user_id = $15
+      AND user_id = $16
     )
     OR (
       band_id IS NOT NULL
@@ -528,15 +576,15 @@ WHERE id = $14
         band_id IN (
           SELECT id
           FROM bands
-          WHERE owner_id = $15
+          WHERE owner_id = $16
         )
         OR (
-          user_id = $15
+          user_id = $16
           AND EXISTS (
             SELECT 1
             FROM band_members bm
             WHERE bm.band_id = gigs.band_id
-              AND bm.user_id = $15
+              AND bm.user_id = $16
               AND bm.can_create_gigs = TRUE
           )
         )
@@ -561,6 +609,7 @@ RETURNING *
       parsedLatitude,
       parsedLongitude,
       google_place_id?.trim() || null,
+      requestedTimezone,
       id,
       userId,
     ]);
@@ -597,6 +646,7 @@ RETURNING *
 
     const importantChange =
       currentBandId !== normalizedBandId ||
+      previousGig.timezone !== updatedGig.timezone ||
       normalizeDate(previousGig.date) !== normalizeDate(updatedGig.date) ||
       normalizeTime(previousGig.time) !== normalizeTime(updatedGig.time) ||
       normalizeText(previousGig.place) !== normalizeText(updatedGig.place) ||
@@ -631,19 +681,19 @@ RETURNING *
                 AND (
                   (
                     bmp.band_id = $3
-                    AND ($4::date + $5::time) >= bmp.joined_at
+                    AND (($4::date + $5::time) AT TIME ZONE $6) >= bmp.joined_at
                     AND (
                       bmp.left_at IS NULL
-                      OR ($4::date + $5::time) <= bmp.left_at
+                      OR (($4::date + $5::time) AT TIME ZONE $6) <= bmp.left_at
                     )
                   )
                   OR
                   (
-                    bmp.band_id = $6
-                    AND ($7::date + $8::time) >= bmp.joined_at
+                    bmp.band_id = $7
+                    AND (($8::date + $9::time) AT TIME ZONE $10) >= bmp.joined_at
                     AND (
                       bmp.left_at IS NULL
-                      OR ($7::date + $8::time) <= bmp.left_at
+                      OR (($8::date + $9::time) AT TIME ZONE $10) <= bmp.left_at
                     )
                   )
                 )
@@ -654,9 +704,11 @@ RETURNING *
               currentBandId,
               previousGig.date,
               previousGig.time,
+              previousGig.timezone,
               normalizedBandId,
               updatedGig.date,
               updatedGig.time,
+              updatedGig.timezone,
             ],
           );
 
@@ -869,13 +921,19 @@ export const deleteGig = async (req: AuthRequest, res: Response) => {
                 ON deleter.id = $2
               WHERE bmp.band_id = $1
                 AND bmp.user_id <> $2
-                AND ($3::date + $4::time) >= bmp.joined_at
+                AND (($3::date + $4::time) AT TIME ZONE $5) >= bmp.joined_at
                 AND (
                   bmp.left_at IS NULL
-                  OR ($3::date + $4::time) <= bmp.left_at
+                  OR (($3::date + $4::time) AT TIME ZONE $5) <= bmp.left_at
                 )
             `,
-            [deletedGig.band_id, userId, deletedGig.date, deletedGig.time],
+            [
+              deletedGig.band_id,
+              userId,
+              deletedGig.date,
+              deletedGig.time,
+              deletedGig.timezone,
+            ],
           );
 
           const userIds = recipientsResult.rows.map((row) =>

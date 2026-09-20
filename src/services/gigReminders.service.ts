@@ -1,7 +1,6 @@
 import { pool } from "../lib/db";
 import { sendPushToUsers } from "./pushNotifications.service";
 
-import { APP_TIMEZONE } from "../lib/config";
 
 type ReminderRow = {
   gig_id: number;
@@ -10,6 +9,7 @@ type ReminderRow = {
   band_id: number | null;
   gig_date: string;
   gig_time: string;
+  gig_timezone: string;
   user_id: number;
 };
 
@@ -60,16 +60,15 @@ async function checkReminder(
           g.band_id,
           g.user_id AS owner_user_id,
           TO_CHAR(g.date, 'YYYY-MM-DD') AS gig_date,
-          TO_CHAR(g.time, 'HH24:MI:SS') AS gig_time
+          TO_CHAR(g.time, 'HH24:MI:SS') AS gig_time,
+          g.timezone AS gig_timezone
         FROM gigs g
         WHERE
-          (g.date + g.time) >=
-            (NOW() AT TIME ZONE $1)
-            + (($2 - 5) * INTERVAL '1 minute')
+          ((g.date + g.time) AT TIME ZONE g.timezone) >=
+            NOW() + (($1 - 5) * INTERVAL '1 minute')
           AND
-          (g.date + g.time) <
-            (NOW() AT TIME ZONE $1)
-            + (($2 + 5) * INTERVAL '1 minute')
+          ((g.date + g.time) AT TIME ZONE g.timezone) <
+            NOW() + (($1 + 5) * INTERVAL '1 minute')
       ),
       recipients AS (
         SELECT DISTINCT
@@ -79,6 +78,7 @@ async function checkReminder(
           ug.band_id,
           ug.gig_date,
           ug.gig_time,
+          ug.gig_timezone,
           recipient.user_id
         FROM upcoming_gigs ug
         CROSS JOIN LATERAL (
@@ -92,12 +92,12 @@ async function checkReminder(
             AND bmp.band_id = ug.band_id
             AND (
               ug.gig_date::date + ug.gig_time::time
-            ) AT TIME ZONE $1 >= bmp.joined_at
+            ) AT TIME ZONE ug.gig_timezone >= bmp.joined_at
             AND (
               bmp.left_at IS NULL
               OR (
                 ug.gig_date::date + ug.gig_time::time
-              ) AT TIME ZONE $1 <= bmp.left_at
+              ) AT TIME ZONE ug.gig_timezone <= bmp.left_at
             )
         ) recipient
       )
@@ -113,14 +113,14 @@ async function checkReminder(
         FROM gig_notification_deliveries gnd
         WHERE gnd.gig_id = r.gig_id
           AND gnd.user_id = r.user_id
-          AND gnd.notification_type = $3
+          AND gnd.notification_type = $2
           AND gnd.gig_date = r.gig_date::date
           AND gnd.gig_time = r.gig_time::time
+          AND gnd.gig_timezone = r.gig_timezone
       )
       ORDER BY r.gig_id, r.user_id
     `,
     [
-      APP_TIMEZONE,
       config.minutesBefore,
       config.notificationType,
     ],
@@ -175,9 +175,10 @@ async function checkReminder(
               user_id,
               notification_type,
               gig_date,
-              gig_time
+              gig_time,
+              gig_timezone
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT DO NOTHING
           `,
           [
@@ -186,6 +187,7 @@ async function checkReminder(
             config.notificationType,
             row.gig_date,
             row.gig_time,
+            row.gig_timezone,
           ],
         );
       }
@@ -217,13 +219,14 @@ async function checkPendingPayments(): Promise<void> {
           g.user_id AS owner_user_id,
           g.collected_amount AS owner_collected_amount,
           TO_CHAR(g.date, 'YYYY-MM-DD') AS gig_date,
-          TO_CHAR(g.time, 'HH24:MI:SS') AS gig_time
+          TO_CHAR(g.time, 'HH24:MI:SS') AS gig_time,
+          g.timezone AS gig_timezone
         FROM gigs g
         WHERE g.date = (
-          (NOW() AT TIME ZONE $1)::date - INTERVAL '1 day'
+          (NOW() AT TIME ZONE g.timezone)::date - INTERVAL '1 day'
         )::date
-          AND (NOW() AT TIME ZONE $1)::time >= TIME '10:00'
-          AND (NOW() AT TIME ZONE $1)::time < TIME '10:10'
+          AND (NOW() AT TIME ZONE g.timezone)::time >= TIME '10:00'
+          AND (NOW() AT TIME ZONE g.timezone)::time < TIME '10:10'
       ),
       recipients AS (
         SELECT DISTINCT
@@ -233,6 +236,7 @@ async function checkPendingPayments(): Promise<void> {
           yg.band_id,
           yg.gig_date,
           yg.gig_time,
+          yg.gig_timezone,
           recipient.user_id,
           recipient.collected_amount
         FROM yesterday_gigs yg
@@ -255,12 +259,12 @@ async function checkPendingPayments(): Promise<void> {
             AND bmp.user_id <> yg.owner_user_id
             AND (
               yg.gig_date::date + yg.gig_time::time
-            ) AT TIME ZONE $1 >= bmp.joined_at
+            ) AT TIME ZONE yg.gig_timezone >= bmp.joined_at
             AND (
               bmp.left_at IS NULL
               OR (
                 yg.gig_date::date + yg.gig_time::time
-              ) AT TIME ZONE $1 <= bmp.left_at
+              ) AT TIME ZONE yg.gig_timezone <= bmp.left_at
             )
         ) recipient
       )
@@ -277,13 +281,14 @@ async function checkPendingPayments(): Promise<void> {
           FROM gig_notification_deliveries gnd
           WHERE gnd.gig_id = r.gig_id
             AND gnd.user_id = r.user_id
-            AND gnd.notification_type = $2
+            AND gnd.notification_type = $1
             AND gnd.gig_date = r.gig_date::date
             AND gnd.gig_time = r.gig_time::time
+            AND gnd.gig_timezone = r.gig_timezone
         )
       ORDER BY r.gig_id, r.user_id
     `,
-    [APP_TIMEZONE, notificationType],
+    [notificationType],
   );
 
   for (const row of result.rows) {
@@ -313,9 +318,10 @@ async function checkPendingPayments(): Promise<void> {
             user_id,
             notification_type,
             gig_date,
-            gig_time
+            gig_time,
+            gig_timezone
           )
-          VALUES ($1, $2, $3, $4, $5)
+          VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT DO NOTHING
         `,
         [
@@ -324,6 +330,7 @@ async function checkPendingPayments(): Promise<void> {
           notificationType,
           row.gig_date,
           row.gig_time,
+          row.gig_timezone,
         ],
       );
 

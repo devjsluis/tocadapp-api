@@ -1,7 +1,6 @@
 import { Response } from "express";
 
 import { pool } from "../lib/db";
-import { APP_TIMEZONE } from "../lib/config";
 import { AuthRequest } from "../middleware/auth";
 
 type MovementType = "INCOME" | "EXPENSE";
@@ -35,17 +34,17 @@ async function userCanAccessGig(
               FROM band_member_periods bmp
               WHERE bmp.band_id = g.band_id
                 AND bmp.user_id = $2
-                AND ((g.date + g.time) AT TIME ZONE $3) >= bmp.joined_at
+                AND ((g.date + g.time) AT TIME ZONE g.timezone) >= bmp.joined_at
                 AND (
                   bmp.left_at IS NULL
-                  OR ((g.date + g.time) AT TIME ZONE $3) <= bmp.left_at
+                  OR ((g.date + g.time) AT TIME ZONE g.timezone) <= bmp.left_at
                 )
             )
           )
         )
       LIMIT 1
     `,
-    [gigId, userId, APP_TIMEZONE],
+    [gigId, userId],
   );
 
   return (result.rowCount ?? 0) > 0;
