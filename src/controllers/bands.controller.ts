@@ -122,7 +122,7 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
     await client.query("BEGIN");
 
     const bandResult = await client.query(
-      `SELECT *
+      `SELECT id, name, owner_id, invite_code, created_at
        FROM bands
        WHERE invite_code = $1
          AND archived_at IS NULL
@@ -137,14 +137,14 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
 
     const band = bandResult.rows[0];
 
-    if (band.owner_id === userId) {
+    if (Number(band.owner_id) === userId) {
       await client.query("ROLLBACK");
-      return res
-        .status(400)
-        .json({ error: "Ya eres el encargado de esta banda" });
+      return res.status(400).json({
+        error: "Ya eres el encargado de esta banda",
+      });
     }
 
-    const existing = await client.query(
+    const membershipResult = await client.query(
       `SELECT id
        FROM band_members
        WHERE band_id = $1
@@ -152,26 +152,383 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
       [band.id, userId],
     );
 
-    if (existing.rowCount! > 0) {
+    if ((membershipResult.rowCount ?? 0) > 0) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ error: "Ya eres miembro de esta banda" });
+      return res.status(409).json({
+        error: "Ya eres miembro de esta banda",
+      });
     }
 
-    await client.query(
-      `INSERT INTO band_members (band_id, user_id, role)
-       VALUES ($1, $2, $3)`,
-      [band.id, userId, "musician"],
+    const pendingResult = await client.query(
+      `SELECT id
+       FROM band_join_requests
+       WHERE band_id = $1
+         AND user_id = $2
+         AND status = 'PENDING'`,
+      [band.id, userId],
     );
 
-    await client.query(
-      `INSERT INTO band_member_periods (band_id, user_id, joined_at)
-       VALUES ($1, $2, NOW())`,
+    if ((pendingResult.rowCount ?? 0) > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Ya tienes una solicitud pendiente para esta banda",
+      });
+    }
+
+    const requestResult = await client.query(
+      `INSERT INTO band_join_requests (
+         band_id,
+         user_id,
+         status
+       )
+       VALUES ($1, $2, 'PENDING')
+       RETURNING id, band_id, user_id, status, created_at`,
       [band.id, userId],
     );
 
     await client.query("COMMIT");
 
-    return res.json({ ok: true, data: band });
+    return res.status(201).json({
+      ok: true,
+      data: {
+        ...requestResult.rows[0],
+        band_name: band.name,
+      },
+    });
+  } catch (error: any) {
+    await client.query("ROLLBACK");
+
+    if (error?.code === "23505") {
+      return res.status(409).json({
+        error: "Ya tienes una solicitud pendiente para esta banda",
+      });
+    }
+
+    return res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+export const getBandJoinRequests = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const bandId = Number(req.params.id);
+  const requesterId = req.user!.id;
+
+  if (!Number.isInteger(bandId) || bandId <= 0) {
+    return res.status(400).json({ error: "Banda inválida" });
+  }
+
+  try {
+    const bandResult = await pool.query(
+      `SELECT id
+       FROM bands
+       WHERE id = $1
+         AND owner_id = $2
+         AND archived_at IS NULL`,
+      [bandId, requesterId],
+    );
+
+    if (bandResult.rowCount === 0) {
+      return res.status(403).json({
+        error: "Solo el encargado puede consultar las solicitudes",
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         bjr.id,
+         bjr.band_id,
+         bjr.user_id,
+         bjr.status,
+         bjr.created_at,
+         u.name,
+         u.last_name,
+         u.email
+       FROM band_join_requests bjr
+       JOIN users u
+         ON u.id = bjr.user_id
+       WHERE bjr.band_id = $1
+         AND bjr.status = 'PENDING'
+       ORDER BY bjr.created_at ASC`,
+      [bandId],
+    );
+
+    return res.json({
+      ok: true,
+      data: result.rows,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const acceptBandJoinRequest = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const bandId = Number(req.params.id);
+  const requestId = Number(req.params.requestId);
+  const requesterId = req.user!.id;
+  const { joined_at } = req.body;
+
+  if (!Number.isInteger(bandId) || bandId <= 0) {
+    return res.status(400).json({ error: "Banda inválida" });
+  }
+
+  if (!Number.isInteger(requestId) || requestId <= 0) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  if (!joined_at) {
+    return res.status(400).json({
+      error: "La fecha de entrada es obligatoria",
+    });
+  }
+
+  const parsedJoinedAt = new Date(joined_at);
+
+  if (Number.isNaN(parsedJoinedAt.getTime())) {
+    return res.status(400).json({
+      error: "La fecha de entrada no es válida",
+    });
+  }
+
+  if (parsedJoinedAt.getTime() > Date.now()) {
+    return res.status(400).json({
+      error: "La fecha de entrada no puede estar en el futuro",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const bandResult = await client.query(
+      `SELECT id, name, owner_id, created_at
+       FROM bands
+       WHERE id = $1
+         AND archived_at IS NULL
+       FOR UPDATE`,
+      [bandId],
+    );
+
+    if (bandResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "Banda no encontrada o deshabilitada",
+      });
+    }
+
+    const band = bandResult.rows[0];
+
+    if (Number(band.owner_id) !== requesterId) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "Solo el encargado puede aceptar solicitudes",
+      });
+    }
+
+    const requestResult = await client.query(
+      `SELECT id, band_id, user_id, status
+       FROM band_join_requests
+       WHERE id = $1
+         AND band_id = $2
+       FOR UPDATE`,
+      [requestId, bandId],
+    );
+
+    if (requestResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        error: "Solicitud no encontrada",
+      });
+    }
+
+    const joinRequest = requestResult.rows[0];
+
+    if (joinRequest.status !== "PENDING") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Esta solicitud ya fue resuelta",
+      });
+    }
+
+    const memberUserId = Number(joinRequest.user_id);
+
+    const membershipResult = await client.query(
+      `SELECT id
+       FROM band_members
+       WHERE band_id = $1
+         AND user_id = $2
+       FOR UPDATE`,
+      [bandId, memberUserId],
+    );
+
+    if ((membershipResult.rowCount ?? 0) > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Este usuario ya pertenece a la banda",
+      });
+    }
+
+    const previousPeriodResult = await client.query(
+      `SELECT id, joined_at, left_at
+       FROM band_member_periods
+       WHERE band_id = $1
+         AND user_id = $2
+       ORDER BY joined_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [bandId, memberUserId],
+    );
+
+    if ((previousPeriodResult.rowCount ?? 0) > 0) {
+      const previousPeriod = previousPeriodResult.rows[0];
+
+      if (previousPeriod.left_at === null) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error: "Este usuario ya tiene un periodo activo en la banda",
+        });
+      }
+
+      if (
+        parsedJoinedAt.getTime() <=
+        new Date(previousPeriod.left_at).getTime()
+      ) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error:
+            "La nueva fecha de entrada debe ser posterior a la última salida del integrante",
+        });
+      }
+    }
+
+    await client.query(
+      `INSERT INTO band_members (
+         band_id,
+         user_id,
+         role,
+         joined_at
+       )
+       VALUES ($1, $2, 'musician', $3::timestamptz)`,
+      [bandId, memberUserId, parsedJoinedAt.toISOString()],
+    );
+
+    const periodResult = await client.query(
+      `INSERT INTO band_member_periods (
+         band_id,
+         user_id,
+         joined_at
+       )
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [bandId, memberUserId, parsedJoinedAt.toISOString()],
+    );
+
+    await client.query(
+      `UPDATE band_join_requests
+       SET status = 'ACCEPTED',
+           resolved_at = NOW(),
+           resolved_by = $1
+       WHERE id = $2`,
+      [requesterId, requestId],
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      data: {
+        request_id: requestId,
+        band_id: bandId,
+        user_id: memberUserId,
+        status: "ACCEPTED",
+        period: periodResult.rows[0],
+      },
+    });
+  } catch (error: any) {
+    await client.query("ROLLBACK");
+
+    if (error?.code === "23505") {
+      return res.status(409).json({
+        error: "Este usuario ya pertenece a la banda o ya tiene un periodo activo",
+      });
+    }
+
+    return res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+export const rejectBandJoinRequest = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const bandId = Number(req.params.id);
+  const requestId = Number(req.params.requestId);
+  const requesterId = req.user!.id;
+
+  if (!Number.isInteger(bandId) || bandId <= 0) {
+    return res.status(400).json({ error: "Banda inválida" });
+  }
+
+  if (!Number.isInteger(requestId) || requestId <= 0) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const bandResult = await client.query(
+      `SELECT id
+       FROM bands
+       WHERE id = $1
+         AND owner_id = $2
+         AND archived_at IS NULL
+       FOR UPDATE`,
+      [bandId, requesterId],
+    );
+
+    if (bandResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "Solo el encargado puede rechazar solicitudes",
+      });
+    }
+
+    const result = await client.query(
+      `UPDATE band_join_requests
+       SET status = 'REJECTED',
+           resolved_at = NOW(),
+           resolved_by = $1
+       WHERE id = $2
+         AND band_id = $3
+         AND status = 'PENDING'
+       RETURNING id, band_id, user_id, status, resolved_at`,
+      [requesterId, requestId, bandId],
+    );
+
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "La solicitud no existe o ya fue resuelta",
+      });
+    }
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      data: result.rows[0],
+    });
   } catch (error: any) {
     await client.query("ROLLBACK");
     return res.status(500).json({ error: error.message });
