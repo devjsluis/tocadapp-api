@@ -4,6 +4,7 @@ import {
   getBands,
   createBand,
   joinBand,
+  getMyBandJoinRequests,
   getBandJoinRequests,
   acceptBandJoinRequest,
   rejectBandJoinRequest,
@@ -24,6 +25,7 @@ router.use(authMiddleware);
 router.get("/", getBands);
 router.post("/", createBand);
 router.post("/join", joinBand);
+router.get("/my-join-requests", getMyBandJoinRequests);
 
 router.get("/:id/join-requests", getBandJoinRequests);
 router.post(

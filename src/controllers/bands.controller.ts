@@ -210,6 +210,41 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const getMyBandJoinRequests = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const userId = req.user!.id;
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         bjr.id,
+         bjr.band_id,
+         bjr.user_id,
+         bjr.status,
+         bjr.created_at,
+         b.name AS band_name,
+         b.created_at AS band_created_at
+       FROM band_join_requests bjr
+       JOIN bands b
+         ON b.id = bjr.band_id
+       WHERE bjr.user_id = $1
+         AND bjr.status = 'PENDING'
+         AND b.archived_at IS NULL
+       ORDER BY bjr.created_at DESC`,
+      [userId],
+    );
+
+    return res.json({
+      ok: true,
+      data: result.rows,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
 export const getBandJoinRequests = async (
   req: AuthRequest,
   res: Response,
