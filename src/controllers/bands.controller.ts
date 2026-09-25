@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { pool } from "../lib/db";
 import { AuthRequest } from "../middleware/auth";
+import { sendPushToUsers } from "../services/pushNotifications.service";
 
 function generateInviteCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -188,10 +189,47 @@ export const joinBand = async (req: AuthRequest, res: Response) => {
 
     await client.query("COMMIT");
 
+    const createdRequest = requestResult.rows[0];
+
+    void (async () => {
+      try {
+        const userResult = await pool.query(
+          `SELECT name, last_name
+           FROM users
+           WHERE id = $1`,
+          [userId],
+        );
+
+        const requester = userResult.rows[0];
+
+        const requesterName = requester
+          ? [requester.name, requester.last_name]
+              .filter(Boolean)
+              .join(" ")
+          : "Un músico";
+
+        await sendPushToUsers({
+          userIds: [Number(band.owner_id)],
+          title: `Nueva solicitud · ${band.name}`,
+          body: `${requesterName} quiere unirse a tu banda.`,
+          data: {
+            type: "band_join_request",
+            bandId: Number(band.id),
+            requestId: Number(createdRequest.id),
+          },
+        });
+      } catch (notificationError) {
+        console.error(
+          "Error al enviar notificación de solicitud de banda:",
+          notificationError,
+        );
+      }
+    })();
+
     return res.status(201).json({
       ok: true,
       data: {
-        ...requestResult.rows[0],
+        ...createdRequest,
         band_name: band.name,
       },
     });
