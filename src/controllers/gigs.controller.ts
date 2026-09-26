@@ -146,9 +146,36 @@ export const createGig = async (req: AuthRequest, res: Response) => {
     longitude,
     google_place_id,
     timezone,
+    client_operation_id,
   } = req.body;
 
   const userId = req.user!.id;
+
+  const clientOperationId =
+    typeof client_operation_id === "string"
+      ? client_operation_id.trim()
+      : "";
+
+  if (clientOperationId.length > 100) {
+    return res.status(400).json({
+      error: "client_operation_id no es válido",
+    });
+  }
+
+  if (clientOperationId) {
+    const existingGigResult = await pool.query(
+      `SELECT *
+       FROM gigs
+       WHERE user_id = $1
+         AND client_operation_id = $2
+       LIMIT 1`,
+      [userId, clientOperationId],
+    );
+
+    if ((existingGigResult.rowCount ?? 0) > 0) {
+      return res.status(200).json(existingGigResult.rows[0]);
+    }
+  }
 
   const timezoneResult = await pool.query<{ timezone: string }>(
     "SELECT timezone FROM users WHERE id = $1",
@@ -276,11 +303,12 @@ notes,
       latitude,
       longitude,
       google_place_id,
-      timezone
+      timezone,
+      client_operation_id
     )
     VALUES (
   $1, $2, $3, $4, $5, $6, $7,
-  $8, $9, $10, $11, $12, $13, $14, $15
+  $8, $9, $10, $11, $12, $13, $14, $15, $16
 )
     RETURNING *
   `;
@@ -302,6 +330,7 @@ notes,
       parsedLongitude,
       google_place_id?.trim() || null,
       gigTimezone,
+      clientOperationId || null,
     ]);
 
     const createdGig = result.rows[0];
@@ -362,6 +391,21 @@ notes,
 
     return res.status(201).json(createdGig);
   } catch (error: any) {
+    if (error?.code === "23505" && clientOperationId) {
+      const existingGigResult = await pool.query(
+        `SELECT *
+         FROM gigs
+         WHERE user_id = $1
+           AND client_operation_id = $2
+         LIMIT 1`,
+        [userId, clientOperationId],
+      );
+
+      if ((existingGigResult.rowCount ?? 0) > 0) {
+        return res.status(200).json(existingGigResult.rows[0]);
+      }
+    }
+
     console.error("Error al crear tocada:", error);
 
     return res.status(500).json({
