@@ -154,8 +154,27 @@ export const createFinancialMovement = async (
 ) => {
   const userId = req.user!.id;
 
-  const { type, amount, category, description, date, gig_id, band_id } =
-    req.body;
+  const {
+    type,
+    amount,
+    category,
+    description,
+    date,
+    gig_id,
+    band_id,
+    client_operation_id,
+  } = req.body;
+
+  const clientOperationId =
+    typeof client_operation_id === "string"
+      ? client_operation_id.trim()
+      : "";
+
+  if (clientOperationId.length > 100) {
+    return res.status(400).json({
+      error: "client_operation_id no puede superar 100 caracteres",
+    });
+  }
 
   const normalizedType = normalizeMovementType(type);
 
@@ -252,6 +271,26 @@ export const createFinancialMovement = async (
       : new Date().toISOString().slice(0, 10);
 
   try {
+    if (clientOperationId) {
+      const existingMovementResult = await pool.query(
+        `
+          SELECT *
+          FROM financial_movements
+          WHERE user_id = $1
+            AND client_operation_id = $2
+          LIMIT 1
+        `,
+        [userId, clientOperationId],
+      );
+
+      if ((existingMovementResult.rowCount ?? 0) > 0) {
+        return res.status(200).json({
+          ok: true,
+          data: existingMovementResult.rows[0],
+        });
+      }
+    }
+
     const result = await pool.query(
       `
         INSERT INTO financial_movements (
@@ -262,10 +301,11 @@ export const createFinancialMovement = async (
           amount,
           category,
           description,
-          date
+          date,
+          client_operation_id
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8
+          $1, $2, $3, $4, $5, $6, $7, $8, $9
         )
         RETURNING *
       `,
@@ -278,6 +318,7 @@ export const createFinancialMovement = async (
         normalizedCategory,
         normalizedDescription,
         normalizedDate,
+        clientOperationId || null,
       ],
     );
 
@@ -286,6 +327,26 @@ export const createFinancialMovement = async (
       data: result.rows[0],
     });
   } catch (error: any) {
+    if (error?.code === "23505" && clientOperationId) {
+      const existingMovementResult = await pool.query(
+        `
+          SELECT *
+          FROM financial_movements
+          WHERE user_id = $1
+            AND client_operation_id = $2
+          LIMIT 1
+        `,
+        [userId, clientOperationId],
+      );
+
+      if ((existingMovementResult.rowCount ?? 0) > 0) {
+        return res.status(200).json({
+          ok: true,
+          data: existingMovementResult.rows[0],
+        });
+      }
+    }
+
     console.error("Error al crear movimiento financiero:", error);
 
     return res.status(500).json({
