@@ -404,6 +404,27 @@ const handleSubscriptionDeleted = async (
   );
 };
 
+const handleInvoicePaymentFailed = async (
+  client: PoolClient,
+  event: Stripe.InvoicePaymentFailedEvent,
+) => {
+  const invoice = event.data.object;
+  const stripeSubscriptionId =
+    getSubscriptionIdFromInvoice(invoice);
+
+  if (!stripeSubscriptionId) {
+    return;
+  }
+
+  const subscription =
+    await stripe.subscriptions.retrieve(stripeSubscriptionId);
+
+  await upsertStripeSubscription(
+    client,
+    subscription,
+  );
+};
+
 export const processStripeEvent = async (
   event: Stripe.Event,
 ) => {
@@ -438,6 +459,10 @@ export const processStripeEvent = async (
     switch (event.type) {
       case "invoice.payment_succeeded":
         await handleInvoicePaymentSucceeded(client, event);
+        break;
+
+      case "invoice.payment_failed":
+        await handleInvoicePaymentFailed(client, event);
         break;
 
       case "customer.subscription.created":
