@@ -124,8 +124,8 @@ export const createUser = async (req: Request, res: Response) => {
           $2,
           'ACTIVE',
           'TRIAL',
+          0,
           $3,
-          $4,
           NOW(),
           NOW(),
           NOW() + INTERVAL '7 days',
@@ -138,7 +138,7 @@ export const createUser = async (req: Request, res: Response) => {
           current_period_start,
           current_period_end
       `,
-      [user.id, plan.id, plan.price_amount, plan.currency],
+      [user.id, plan.id, plan.currency],
     );
 
     await client.query("COMMIT");
