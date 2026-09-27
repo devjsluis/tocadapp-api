@@ -13,6 +13,7 @@ import subscriptionsRoutes from "./routes/subscriptions.routes";
 import { authMiddleware } from "./middleware/auth";
 import adminSubscriptionsRoutes from "./routes/adminSubscriptions.routes";
 import financialMovementsRoutes from "./routes/financialMovements.routes";
+import stripeWebhookRoutes from "./routes/stripeWebhook.routes";
 
 const app = express();
 
@@ -46,6 +47,12 @@ app.use(
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
+);
+
+app.use(
+  "/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  stripeWebhookRoutes,
 );
 
 app.use(express.json());
