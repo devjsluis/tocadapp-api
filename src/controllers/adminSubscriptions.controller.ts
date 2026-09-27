@@ -137,12 +137,8 @@ export const grantManualSubscriptionAccess = async (
     const {
       userId,
       planCode,
-      amount,
-      currency,
       months,
       accessUntil,
-      paymentReference,
-      notes,
     } = req.body;
 
     if (!Number.isInteger(userId) || userId <= 0) {
@@ -156,13 +152,6 @@ export const grantManualSubscriptionAccess = async (
       return res.status(400).json({
         error: "planCode es obligatorio",
         code: "PLAN_CODE_REQUIRED",
-      });
-    }
-
-    if (!Number.isInteger(amount) || amount < 0) {
-      return res.status(400).json({
-        error: "amount debe enviarse en centavos",
-        code: "INVALID_AMOUNT",
       });
     }
 
@@ -183,20 +172,13 @@ export const grantManualSubscriptionAccess = async (
     const result = await grantManualAccess({
       userId,
       planCode: planCode.trim(),
-      amount,
-      currency: typeof currency === "string" ? currency : undefined,
       months,
       accessUntil,
-      paymentReference:
-        typeof paymentReference === "string"
-          ? paymentReference.trim() || null
-          : null,
-      notes: typeof notes === "string" ? notes.trim() || null : null,
       registeredByUserId,
     });
 
     return res.status(201).json({
-      message: "Pago registrado y acceso actualizado",
+      message: "Acceso manual actualizado correctamente",
       data: result,
     });
   } catch (error) {

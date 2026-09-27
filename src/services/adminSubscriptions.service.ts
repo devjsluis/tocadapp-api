@@ -22,12 +22,8 @@ type PaymentPeriodRow = {
 type GrantManualAccessInput = {
   userId: number;
   planCode: string;
-  amount: number;
-  currency?: string;
   months?: number;
   accessUntil?: string;
-  paymentReference?: string | null;
-  notes?: string | null;
   registeredByUserId: number;
 };
 
@@ -270,12 +266,8 @@ export const deleteSubscriptionPayment = async (paymentId: number) => {
 export const grantManualAccess = async ({
   userId,
   planCode,
-  amount,
-  currency = "MXN",
   months,
   accessUntil,
-  paymentReference = null,
-  notes = null,
   registeredByUserId,
 }: GrantManualAccessInput) => {
   const client = await pool.connect();
@@ -317,16 +309,6 @@ export const grantManualAccess = async ({
 
     if (planResult.rowCount === 0) {
       throw new Error("PLAN_NOT_FOUND");
-    }
-
-    if (!Number.isInteger(amount) || amount < 0) {
-      throw new Error("INVALID_AMOUNT");
-    }
-
-    const normalizedCurrency = currency.trim().toUpperCase();
-
-    if (!/^[A-Z]{3}$/.test(normalizedCurrency)) {
-      throw new Error("INVALID_CURRENCY");
     }
 
     const existingSubscriptionResult = await client.query<SubscriptionRow>(
@@ -442,7 +424,7 @@ export const grantManualAccess = async ({
           userId,
           plan.id,
           subscriptionStatus,
-          plan.price_amount,
+          0,
           plan.currency,
           accessFrom.toISOString(),
           calculatedAccessUntil.toISOString(),
@@ -477,7 +459,7 @@ export const grantManualAccess = async ({
         [
           subscriptionStatus,
           plan.id,
-          plan.price_amount,
+          0,
           plan.currency,
           accessFrom.toISOString(),
           calculatedAccessUntil.toISOString(),
@@ -488,56 +470,13 @@ export const grantManualAccess = async ({
       subscription = subscriptionResult.rows[0];
     }
 
-    const paymentResult = await client.query(
-      `
-        INSERT INTO subscription_payments (
-          subscription_id,
-          user_id,
-          provider,
-          amount,
-          currency,
-          paid_at,
-          access_from,
-          access_until,
-          reference,
-          notes,
-          registered_by_user_id
-        )
-        VALUES (
-          $1,
-          $2,
-          'MANUAL',
-          $3,
-          $4,
-          NOW(),
-          $5,
-          $6,
-          $7,
-          $8,
-          $9
-        )
-        RETURNING *
-      `,
-      [
-        subscription.id,
-        userId,
-        amount,
-        normalizedCurrency,
-        accessFrom.toISOString(),
-        calculatedAccessUntil.toISOString(),
-        paymentReference,
-        notes,
-        registeredByUserId,
-      ],
-    );
-
     await client.query("COMMIT");
 
     return {
       user: userResult.rows[0],
       plan,
       subscription,
-      payment: paymentResult.rows[0],
+      grantedByUserId: registeredByUserId,
     };
   } catch (error) {
     await client.query("ROLLBACK");
