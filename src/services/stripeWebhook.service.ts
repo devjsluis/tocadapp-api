@@ -138,6 +138,23 @@ const upsertStripeSubscription = async (
     throw new Error("STRIPE_SUBSCRIPTION_METADATA_MISSING");
   }
 
+  // Un webhook tardío nunca debe volver a crear o actualizar
+  // suscripciones para una cuenta que ya fue eliminada.
+  const userResult = await client.query(
+    `
+      SELECT id
+      FROM users
+      WHERE id = $1
+        AND deleted_at IS NULL
+      LIMIT 1
+    `,
+    [userId],
+  );
+
+  if (userResult.rowCount === 0) {
+    return null;
+  }
+
   const planResult = await client.query<{
     id: string;
     price_amount: number;
@@ -298,6 +315,10 @@ const handleInvoicePaymentSucceeded = async (
     client,
     subscription,
   );
+
+  if (!synced) {
+    return;
+  }
 
   if (invoice.amount_paid <= 0) {
     return;

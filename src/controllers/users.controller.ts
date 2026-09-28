@@ -10,6 +10,8 @@ import {
   createEmailVerificationToken,
   sendEmailVerification,
 } from "../services/emailVerification.service";
+import { deleteUserPersonalData } from "../services/accountDeletion.service";
+import { cancelExternalSubscriptionsForAccountDeletion } from "../services/accountSubscriptionCancellation.service";
 
 export const createUser = async (req: Request, res: Response) => {
   const { email, name, lastName, password } = req.body;
@@ -758,24 +760,20 @@ export const deleteAccount = async (req: AuthRequest, res: Response) => {
     });
   }
 
-  const client = await pool.connect();
-
   try {
-    await client.query("BEGIN");
-
-    const userResult = await client.query(
+    // 1. Validamos credenciales sin mantener una transacción abierta
+    // mientras hablamos con proveedores externos.
+    const userResult = await pool.query(
       `
         SELECT id, password, deleted_at
         FROM users
         WHERE id = $1
-        FOR UPDATE
+        LIMIT 1
       `,
       [userId],
     );
 
     if (userResult.rowCount === 0) {
-      await client.query("ROLLBACK");
-
       return res.status(404).json({
         error: "Usuario no encontrado",
       });
@@ -784,8 +782,6 @@ export const deleteAccount = async (req: AuthRequest, res: Response) => {
     const user = userResult.rows[0];
 
     if (user.deleted_at) {
-      await client.query("ROLLBACK");
-
       return res.status(410).json({
         error: "Esta cuenta ya fue eliminada",
       });
@@ -794,75 +790,93 @@ export const deleteAccount = async (req: AuthRequest, res: Response) => {
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
-      await client.query("ROLLBACK");
-
       return res.status(401).json({
         error: "La contraseña es incorrecta",
       });
     }
 
-    const anonymousEmail = `deleted-${userId}-${randomBytes(8).toString(
-      "hex",
-    )}@deleted.tocadapp.local`;
+    // 2. Detenemos primero cualquier renovación externa.
+    // Si Stripe falla, abortamos la eliminación para no dejar una
+    // cuenta eliminada que todavía pueda seguir generando cobros.
+    await cancelExternalSubscriptionsForAccountDeletion(userId);
 
-    const unusablePassword = await bcrypt.hash(
-      randomBytes(32).toString("hex"),
-      10,
-    );
+    // 3. Ahora sí realizamos la eliminación local de forma atómica.
+    const client = await pool.connect();
 
-    await client.query(
-      `
-        UPDATE password_reset_tokens
-        SET used = TRUE
-        WHERE user_id = $1
-          AND used = FALSE
-      `,
-      [userId],
-    );
+    try {
+      await client.query("BEGIN");
 
-    await client.query(
-      `
-        UPDATE users
-        SET
-          email = $1,
-          name = 'Usuario',
-          last_name = 'eliminado',
-          password = $2,
-          email_verified_at = NULL,
-          deleted_at = NOW()
-        WHERE id = $3
-      `,
-      [anonymousEmail, unusablePassword, userId],
-    );
+      const lockedUserResult = await client.query(
+        `
+          SELECT id, deleted_at
+          FROM users
+          WHERE id = $1
+          FOR UPDATE
+        `,
+        [userId],
+      );
 
-    // La cuenta se anonimiza en lugar de eliminar físicamente la fila de users,
-    // por lo que ON DELETE CASCADE no se ejecuta. Eliminamos explícitamente
-    // todos los dispositivos registrados para que la cuenta eliminada
-    // no pueda seguir recibiendo notificaciones.
-    await client.query(
-      `
-        DELETE FROM user_push_tokens
-        WHERE user_id = $1
-      `,
-      [userId],
-    );
+      if (lockedUserResult.rowCount === 0) {
+        await client.query("ROLLBACK");
 
-    await client.query("COMMIT");
+        return res.status(404).json({
+          error: "Usuario no encontrado",
+        });
+      }
 
-    return res.json({
-      ok: true,
-      message: "Tu cuenta fue eliminada correctamente",
-    });
+      if (lockedUserResult.rows[0].deleted_at) {
+        await client.query("ROLLBACK");
+
+        return res.status(410).json({
+          error: "Esta cuenta ya fue eliminada",
+        });
+      }
+
+      await deleteUserPersonalData(client, userId);
+
+      const anonymousEmail = `deleted-${userId}-${randomBytes(8).toString(
+        "hex",
+      )}@deleted.tocadapp.local`;
+
+      const unusablePassword = await bcrypt.hash(
+        randomBytes(32).toString("hex"),
+        10,
+      );
+
+      await client.query(
+        `
+          UPDATE users
+          SET
+            email = $1,
+            name = 'Usuario',
+            last_name = 'eliminado',
+            password = $2,
+            email_verified_at = NULL,
+            deleted_at = NOW(),
+            session_version = session_version + 1
+          WHERE id = $3
+        `,
+        [anonymousEmail, unusablePassword, userId],
+      );
+
+      await client.query("COMMIT");
+
+      return res.json({
+        ok: true,
+        message: "Tu cuenta fue eliminada correctamente",
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error: unknown) {
-    await client.query("ROLLBACK");
-
     console.error("Error en deleteAccount:", error);
 
     return res.status(500).json({
       error: "No fue posible eliminar la cuenta",
     });
-  } finally {
-    client.release();
   }
 };
 
