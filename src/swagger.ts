@@ -50,7 +50,7 @@ const options: swaggerJsdoc.Options = {
         // ── Users ──
         RegisterRequest: {
           type: "object",
-          required: ["name", "lastName", "email", "password", "role"],
+          required: ["name", "lastName", "email", "password", "role", "acceptTerms"],
           properties: {
             name: {
               type: "string",
@@ -78,6 +78,12 @@ const options: swaggerJsdoc.Options = {
               enum: ["musician", "manager"],
               example: "musician",
               description: "musician = músico, manager = encargado de banda",
+            },
+            acceptTerms: {
+              type: "boolean",
+              example: true,
+              description:
+                "Confirma la aceptación de los Términos y Condiciones y el reconocimiento de la Política de Privacidad vigentes.",
             },
           },
         },

@@ -13,8 +13,10 @@ import {
 import { deleteUserPersonalData } from "../services/accountDeletion.service";
 import { cancelExternalSubscriptionsForAccountDeletion } from "../services/accountSubscriptionCancellation.service";
 
+const CURRENT_TERMS_VERSION = "2026-09-29";
+
 export const createUser = async (req: Request, res: Response) => {
-  const { email, name, lastName, password } = req.body;
+  const { email, name, lastName, password, acceptTerms } = req.body;
 
   if (!email || !name || !lastName || !password) {
     return res.status(400).json({
@@ -26,6 +28,14 @@ export const createUser = async (req: Request, res: Response) => {
   if (typeof password !== "string" || password.length < 6) {
     return res.status(400).json({
       error: "La contraseña debe tener al menos 6 caracteres",
+    });
+  }
+
+  if (acceptTerms !== true) {
+    return res.status(400).json({
+      error:
+        "Debes aceptar los Términos y Condiciones y reconocer la Política de Privacidad para crear tu cuenta",
+      code: "LEGAL_ACCEPTANCE_REQUIRED",
     });
   }
 
@@ -86,9 +96,11 @@ export const createUser = async (req: Request, res: Response) => {
           last_name,
           password,
           role,
-          email_verified_at
+          email_verified_at,
+          terms_accepted_at,
+          terms_version
         )
-        VALUES ($1, $2, $3, $4, 'musician', NULL)
+        VALUES ($1, $2, $3, $4, 'musician', NULL, NOW(), $5)
         RETURNING
           id,
           email,
@@ -97,7 +109,13 @@ export const createUser = async (req: Request, res: Response) => {
           role,
           created_at
       `,
-      [normalizedEmail, normalizedName, normalizedLastName, hashedPassword],
+      [
+        normalizedEmail,
+        normalizedName,
+        normalizedLastName,
+        hashedPassword,
+        CURRENT_TERMS_VERSION,
+      ],
     );
 
     const user = userResult.rows[0];
