@@ -12,6 +12,7 @@ import {
   cancelStripeSubscriptionAtPeriodEnd,
   reactivateStripeSubscription,
 } from "../services/stripeSubscriptionManagement.service";
+import { syncGooglePlaySubscription } from "../services/googlePlaySubscription.service";
 
 export const getMySubscription = async (
   req: AuthRequest,
@@ -125,5 +126,84 @@ export const reactivateMySubscription = async (
     });
   } catch (error) {
     return handleStripeManagementError(error, res);
+  }
+};
+
+
+export const verifyGooglePlaySubscription = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  try {
+    const { purchaseToken } = req.body;
+
+    if (
+      typeof purchaseToken !== "string" ||
+      purchaseToken.trim().length === 0
+    ) {
+      return res.status(400).json({
+        error: "Token de compra inválido",
+        code: "INVALID_PURCHASE_TOKEN",
+      });
+    }
+
+    const result = await syncGooglePlaySubscription({
+      userId: req.user!.id,
+      purchaseToken,
+    });
+
+    const subscription = await getCurrentSubscriptionByUserId(
+      req.user!.id,
+    );
+
+    return res.json({
+      hasAccess: subscriptionGrantsAccess(subscription),
+      subscription,
+      googlePlay: result,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED"
+    ) {
+      return res.status(409).json({
+        error: "Esta compra ya está asociada a otra cuenta",
+        code: "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED",
+      });
+    }
+
+    if (
+      error instanceof Error &&
+      (
+        error.message === "GOOGLE_PLAY_INVALID_PRODUCT" ||
+        error.message === "GOOGLE_PLAY_INVALID_BASE_PLAN" ||
+        error.message === "GOOGLE_PLAY_UNEXPECTED_LINE_ITEMS"
+      )
+    ) {
+      return res.status(400).json({
+        error: "La compra no corresponde a una suscripción válida de TocadApp",
+        code: "INVALID_GOOGLE_PLAY_PURCHASE",
+      });
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === "PLAN_NOT_FOUND"
+    ) {
+      return res.status(404).json({
+        error: "El plan de TocadApp no está disponible",
+        code: "PLAN_NOT_FOUND",
+      });
+    }
+
+    console.error(
+      "Error verificando suscripción de Google Play:",
+      error instanceof Error ? error.message : "UNKNOWN_ERROR",
+    );
+
+    return res.status(502).json({
+      error: "No fue posible verificar la compra con Google Play",
+      code: "GOOGLE_PLAY_VERIFICATION_FAILED",
+    });
   }
 };
