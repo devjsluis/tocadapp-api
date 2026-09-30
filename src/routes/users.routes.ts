@@ -9,6 +9,7 @@ import {
   resetPassword,
   refreshAccessToken,
   changePassword,
+  changeUnverifiedEmail,
   deleteAccount,
 } from "../controllers/users.controller";
 import { authMiddleware } from "../middleware/auth";
@@ -41,6 +42,7 @@ router.post("/login", loginRateLimiter, loginUser);
 router.post("/refresh", refreshAccessToken);
 router.post("/verify-email", verifyEmail);
 router.post("/resend-verification", emailActionRateLimiter, resendEmailVerification);
+router.post("/change-unverified-email", emailActionRateLimiter, changeUnverifiedEmail);
 router.post("/forgot-password", emailActionRateLimiter, forgotPassword);
 router.post("/reset-password", resetPasswordRateLimiter, resetPassword);
 

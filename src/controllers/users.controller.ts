@@ -212,6 +212,169 @@ export const createUser = async (req: Request, res: Response) => {
   }
 };
 
+export const changeUnverifiedEmail = async (
+  req: Request,
+  res: Response,
+) => {
+  const { currentEmail, newEmail, password } = req.body;
+
+  if (
+    typeof currentEmail !== "string" ||
+    typeof newEmail !== "string" ||
+    typeof password !== "string" ||
+    !currentEmail.trim() ||
+    !newEmail.trim() ||
+    !password
+  ) {
+    return res.status(400).json({
+      error: "El correo actual, el correo nuevo y la contraseña son obligatorios",
+    });
+  }
+
+  const normalizedCurrentEmail = currentEmail.trim().toLowerCase();
+  const normalizedNewEmail = newEmail.trim().toLowerCase();
+
+  if (normalizedCurrentEmail === normalizedNewEmail) {
+    return res.status(400).json({
+      error: "El nuevo correo debe ser diferente al actual",
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const userResult = await client.query(
+      `
+        SELECT
+          id,
+          email,
+          name,
+          password,
+          email_verified_at
+        FROM users
+        WHERE LOWER(email) = LOWER($1)
+          AND deleted_at IS NULL
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [normalizedCurrentEmail],
+    );
+
+    if (userResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(401).json({
+        error: "Correo o contraseña incorrectos",
+        code: "INVALID_CREDENTIALS",
+      });
+    }
+
+    const user = userResult.rows[0];
+    const validPassword = await bcrypt.compare(password, user.password);
+
+    if (!validPassword) {
+      await client.query("ROLLBACK");
+
+      return res.status(401).json({
+        error: "Correo o contraseña incorrectos",
+        code: "INVALID_CREDENTIALS",
+      });
+    }
+
+    if (user.email_verified_at) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error: "Este correo ya fue verificado",
+        code: "EMAIL_ALREADY_VERIFIED",
+      });
+    }
+
+    const existingEmail = await client.query(
+      `
+        SELECT id
+        FROM users
+        WHERE LOWER(email) = LOWER($1)
+          AND id <> $2
+        LIMIT 1
+      `,
+      [normalizedNewEmail, user.id],
+    );
+
+    if ((existingEmail.rowCount ?? 0) > 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error: "Ese correo electrónico ya está registrado",
+        code: "EMAIL_ALREADY_IN_USE",
+      });
+    }
+
+    await client.query(
+      `
+        UPDATE users
+        SET email = $1
+        WHERE id = $2
+      `,
+      [normalizedNewEmail, user.id],
+    );
+
+    const verificationToken = await createEmailVerificationToken(
+      client,
+      user.id,
+    );
+
+    await client.query("COMMIT");
+
+    let emailSent = false;
+
+    try {
+      await sendEmailVerification(
+        normalizedNewEmail,
+        user.name,
+        verificationToken,
+      );
+
+      emailSent = true;
+    } catch (emailError) {
+      console.error(
+        "El correo se actualizó, pero no se envió la verificación:",
+        emailError,
+      );
+    }
+
+    return res.json({
+      ok: true,
+      email: normalizedNewEmail,
+      emailSent,
+      message: emailSent
+        ? "Correo actualizado. Te enviamos un nuevo enlace de verificación."
+        : "Correo actualizado, pero no fue posible enviar el enlace de verificación. Puedes solicitar otro.",
+    });
+  } catch (error: unknown) {
+    await client.query("ROLLBACK");
+
+    const databaseError = error as { code?: string };
+
+    if (databaseError.code === "23505") {
+      return res.status(409).json({
+        error: "Ese correo electrónico ya está registrado",
+        code: "EMAIL_ALREADY_IN_USE",
+      });
+    }
+
+    console.error("Error cambiando correo no verificado:", error);
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
+  } finally {
+    client.release();
+  }
+};
+
 export const loginUser = async (req: Request, res: Response) => {
   const { email, password } = req.body;
 
