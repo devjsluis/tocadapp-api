@@ -15,6 +15,10 @@ import { cancelExternalSubscriptionsForAccountDeletion } from "../services/accou
 
 const CURRENT_TERMS_VERSION = "2026-09-29";
 
+const isValidEmail = (email: string): boolean => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+};
+
 export const createUser = async (req: Request, res: Response) => {
   const { email, name, lastName, password, acceptTerms } = req.body;
 
@@ -46,6 +50,13 @@ export const createUser = async (req: Request, res: Response) => {
   if (!normalizedEmail || !normalizedName || !normalizedLastName) {
     return res.status(400).json({
       error: "Nombre, apellido y correo no pueden estar vacíos",
+    });
+  }
+
+  if (!isValidEmail(normalizedEmail)) {
+    return res.status(400).json({
+      error: "Ingresa un correo electrónico válido",
+      code: "INVALID_EMAIL",
     });
   }
 
@@ -233,6 +244,13 @@ export const changeUnverifiedEmail = async (
 
   const normalizedCurrentEmail = currentEmail.trim().toLowerCase();
   const normalizedNewEmail = newEmail.trim().toLowerCase();
+
+  if (!isValidEmail(normalizedNewEmail)) {
+    return res.status(400).json({
+      error: "Ingresa un correo electrónico válido",
+      code: "INVALID_EMAIL",
+    });
+  }
 
   if (normalizedCurrentEmail === normalizedNewEmail) {
     return res.status(400).json({

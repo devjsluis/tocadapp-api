@@ -3,7 +3,7 @@ import type { Request } from "express";
 import { createHash } from "crypto";
 
 const normalizeEmail = (req: Request): string => {
-  const email = req.body?.email;
+  const email = req.body?.email ?? req.body?.currentEmail;
 
   if (typeof email !== "string" || !email.trim()) {
     return "missing-email";
