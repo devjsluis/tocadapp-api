@@ -383,6 +383,7 @@ export const syncGooglePlaySubscription = async ({
     if (canAcknowledge) {
       await androidPublisher.purchases.subscriptions.acknowledge({
         packageName: GOOGLE_PLAY_PACKAGE_NAME,
+        subscriptionId: GOOGLE_PLAY_PRODUCT_ID,
         token: verified.purchaseToken,
         requestBody: {},
       });
