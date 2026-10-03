@@ -307,6 +307,8 @@ export const syncGooglePlaySubscription = async ({
             canceled_at = CASE
               WHEN $8::timestamptz IS NOT NULL
                 THEN COALESCE(canceled_at, $8::timestamptz)
+              WHEN $9::timestamptz IS NOT NULL
+                THEN canceled_at
               ELSE NULL
             END,
             ended_at = $9
