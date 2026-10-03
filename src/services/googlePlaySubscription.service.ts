@@ -304,7 +304,11 @@ export const syncGooglePlaySubscription = async ({
             current_period_start = COALESCE(current_period_start, $5),
             current_period_end = $6,
             cancel_at_period_end = $7,
-            canceled_at = $8,
+            canceled_at = CASE
+              WHEN $8::timestamptz IS NOT NULL
+                THEN COALESCE(canceled_at, $8::timestamptz)
+              ELSE NULL
+            END,
             ended_at = $9
           WHERE id = $10
         `,
@@ -409,4 +413,29 @@ export const syncGooglePlaySubscription = async ({
   } finally {
     client.release();
   }
+};
+
+export const findGooglePlaySubscriptionOwner = async (
+  purchaseToken: string,
+): Promise<number | null> => {
+  const token = purchaseToken.trim();
+
+  if (!token) {
+    return null;
+  }
+
+  const { query } = await import("../lib/db");
+
+  const result = await query<{ user_id: number }>(
+    `
+      SELECT user_id
+      FROM subscriptions
+      WHERE provider = 'GOOGLE_PLAY'
+        AND provider_subscription_id = $1
+      LIMIT 1
+    `,
+    [token],
+  );
+
+  return result.rows[0]?.user_id ?? null;
 };

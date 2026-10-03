@@ -14,6 +14,7 @@ import { authMiddleware } from "./middleware/auth";
 import adminSubscriptionsRoutes from "./routes/adminSubscriptions.routes";
 import financialMovementsRoutes from "./routes/financialMovements.routes";
 import stripeWebhookRoutes from "./routes/stripeWebhook.routes";
+import googlePlayWebhookRoutes from "./routes/googlePlayWebhook.routes";
 
 const app = express();
 
@@ -56,6 +57,8 @@ app.use(
 );
 
 app.use(express.json());
+
+app.use("/webhooks/google-play", googlePlayWebhookRoutes);
 
 app.get("/", (_req, res) => {
   res.json({ message: "TocadApp API is running" });
