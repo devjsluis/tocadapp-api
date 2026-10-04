@@ -470,6 +470,7 @@ export const loginUser = async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        timezone: user.timezone,
       },
     });
   } catch (error: any) {
