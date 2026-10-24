@@ -171,6 +171,20 @@ export const syncGooglePlaySubscription = async ({
   try {
     await client.query("BEGIN");
 
+    // Serialize claims even when neither token has a subscription row yet.
+    // Always lock in the same order, before locking the user, across accounts.
+    const tokens = [...new Set([
+      verified.purchaseToken,
+      ...(verified.linkedPurchaseToken ? [verified.linkedPurchaseToken] : []),
+    ])].sort();
+
+    for (const token of tokens) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [token],
+      );
+    }
+
     const userResult = await client.query(
       `
         SELECT id
@@ -185,6 +199,61 @@ export const syncGooglePlaySubscription = async ({
 
     if (userResult.rowCount === 0) {
       throw new Error("USER_NOT_FOUND");
+    }
+
+    const ownershipResult = await client.query<{
+      purchase_token: string;
+      user_id: number;
+      replaced_by_token: string | null;
+    }>(
+      `
+        SELECT purchase_token, user_id, replaced_by_token
+        FROM google_play_purchase_tokens
+        WHERE purchase_token = ANY($1::text[])
+        ORDER BY purchase_token
+        FOR UPDATE
+      `,
+      [tokens],
+    );
+
+    if (ownershipResult.rows.some((row) => row.user_id !== userId)) {
+      throw new Error("GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED");
+    }
+
+    const currentOwnership = ownershipResult.rows.find(
+      (row) => row.purchase_token === verified.purchaseToken,
+    );
+
+    // A superseded token is terminal locally, regardless of a stale Google
+    // response. In particular, never expire its successor or acknowledge it.
+    if (currentOwnership?.replaced_by_token) {
+      await client.query("COMMIT");
+      transactionCommitted = true;
+      return {
+        subscriptionId: null,
+        status: "EXPIRED" as const,
+        planCode: verified.planCode,
+        currentPeriodEnd: verified.expiryTime,
+        cancelAtPeriodEnd: true,
+        acknowledgementState: verified.acknowledgementState,
+        isTestPurchase: verified.isTestPurchase,
+      };
+    }
+
+    const linkedOwnership = ownershipResult.rows.find(
+      (row) => row.purchase_token === verified.linkedPurchaseToken,
+    );
+    // An unseen predecessor may itself link to another account's purchase.
+    // Do not assign a disconnected fragment of that chain to the caller.
+    if (verified.linkedPurchaseToken && !linkedOwnership) {
+      throw new Error("GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN");
+    }
+
+    if (
+      linkedOwnership?.replaced_by_token &&
+      linkedOwnership.replaced_by_token !== verified.purchaseToken
+    ) {
+      throw new Error("GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED");
     }
 
     const planResult = await client.query<PlanRow>(
@@ -229,6 +298,48 @@ export const syncGooglePlaySubscription = async ({
     }
 
     const status = mapGooglePlayStatus(verified);
+
+    // Persist ownership of the current token; a linked predecessor must
+    // already have an owner, checked above under the same token locks.
+    for (const token of tokens) {
+      await client.query(
+        `
+          INSERT INTO google_play_purchase_tokens (purchase_token, user_id)
+          VALUES ($1, $2)
+          ON CONFLICT (purchase_token) DO NOTHING
+        `,
+        [token, userId],
+      );
+    }
+
+    const replacesPreviousPurchase =
+      verified.linkedPurchaseToken &&
+      verified.linkedPurchaseToken !== verified.purchaseToken &&
+      verified.subscriptionState !== "SUBSCRIPTION_STATE_PENDING" &&
+      verified.subscriptionState !== "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED";
+
+    if (replacesPreviousPurchase) {
+      await client.query(
+        `
+          UPDATE google_play_purchase_tokens
+          SET replaced_by_token = $2
+          WHERE purchase_token = $1 AND user_id = $3
+        `,
+        [verified.linkedPurchaseToken, verified.purchaseToken, userId],
+      );
+      await client.query(
+        `
+          UPDATE subscriptions
+          SET status = 'EXPIRED',
+              ended_at = COALESCE(ended_at, GREATEST(started_at, NOW())),
+              cancel_at_period_end = FALSE
+          WHERE provider = 'GOOGLE_PLAY'
+            AND provider_subscription_id = $1
+            AND user_id = $2
+        `,
+        [verified.linkedPurchaseToken, userId],
+      );
+    }
 
     const canceledAt =
       verified.subscriptionState === "SUBSCRIPTION_STATE_CANCELED"
