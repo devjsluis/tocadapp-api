@@ -18,6 +18,7 @@ export type VerifiedGooglePlaySubscription = {
   autoRenewEnabled: boolean;
   latestSuccessfulOrderId: string | null;
   linkedPurchaseToken: string | null;
+  expiredPurchaseToken: string | null;
   isTestPurchase: boolean;
 };
 
@@ -46,9 +47,7 @@ const parseGoogleDate = (
   return date;
 };
 
-export const verifyGooglePlaySubscription = async (
-  purchaseToken: string,
-): Promise<VerifiedGooglePlaySubscription> => {
+export const getGooglePlaySubscription = async (purchaseToken: string) => {
   const token = purchaseToken.trim();
 
   if (!token) {
@@ -86,6 +85,16 @@ export const verifyGooglePlaySubscription = async (
     throw new Error("GOOGLE_PLAY_SUBSCRIPTION_STATE_MISSING");
   }
 
+  return purchase;
+};
+
+export const verifyGooglePlaySubscription = async (
+  purchaseToken: string,
+): Promise<VerifiedGooglePlaySubscription> => {
+  const purchase = await getGooglePlaySubscription(purchaseToken);
+  const lineItem = purchase.lineItems![0]!;
+  const basePlanId = lineItem.offerDetails!.basePlanId as GooglePlayBasePlanId;
+  const subscriptionState = purchase.subscriptionState!;
   const startTime = parseGoogleDate(
     purchase.startTime,
     "GOOGLE_PLAY_START_TIME_MISSING",
@@ -97,7 +106,7 @@ export const verifyGooglePlaySubscription = async (
   );
 
   return {
-    purchaseToken: token,
+    purchaseToken: purchaseToken.trim(),
     planCode: GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE[basePlanId],
     basePlanId,
     subscriptionState,
@@ -109,6 +118,7 @@ export const verifyGooglePlaySubscription = async (
     latestSuccessfulOrderId:
       lineItem.latestSuccessfulOrderId ?? null,
     linkedPurchaseToken: purchase.linkedPurchaseToken ?? null,
+    expiredPurchaseToken: purchase.outOfAppPurchaseContext?.expiredPurchaseToken ?? null,
     isTestPurchase: purchase.testPurchase != null,
   };
 };
@@ -162,7 +172,7 @@ export const syncGooglePlaySubscription = async ({
   userId: number;
   purchaseToken: string;
 }) => {
-  const verified = await verifyGooglePlaySubscription(purchaseToken);
+  let verified = await verifyGooglePlaySubscription(purchaseToken);
 
   const { pool } = await import("../lib/db");
   const client = await pool.connect();
@@ -176,6 +186,7 @@ export const syncGooglePlaySubscription = async ({
     const tokens = [...new Set([
       verified.purchaseToken,
       ...(verified.linkedPurchaseToken ? [verified.linkedPurchaseToken] : []),
+      ...(verified.expiredPurchaseToken ? [verified.expiredPurchaseToken] : []),
     ])].sort();
 
     for (const token of tokens) {
@@ -184,6 +195,17 @@ export const syncGooglePlaySubscription = async ({
         [token],
       );
     }
+
+    // A second worker may have waited here with an older Google snapshot.
+    // Re-read while serialized before changing entitlements.
+    const current = await verifyGooglePlaySubscription(purchaseToken);
+    if (
+      current.linkedPurchaseToken !== verified.linkedPurchaseToken ||
+      current.expiredPurchaseToken !== verified.expiredPurchaseToken
+    ) {
+      throw new Error("GOOGLE_PLAY_PURCHASE_LINK_CHANGED");
+    }
+    verified = current;
 
     const userResult = await client.query(
       `
@@ -246,6 +268,13 @@ export const syncGooglePlaySubscription = async ({
     // An unseen predecessor may itself link to another account's purchase.
     // Do not assign a disconnected fragment of that chain to the caller.
     if (verified.linkedPurchaseToken && !linkedOwnership) {
+      throw new Error("GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN");
+    }
+
+    if (
+      verified.expiredPurchaseToken &&
+      !ownershipResult.rows.some((row) => row.purchase_token === verified.expiredPurchaseToken)
+    ) {
       throw new Error("GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN");
     }
 
@@ -542,9 +571,8 @@ export const findGooglePlaySubscriptionOwner = async (
   const result = await query<{ user_id: number }>(
     `
       SELECT user_id
-      FROM subscriptions
-      WHERE provider = 'GOOGLE_PLAY'
-        AND provider_subscription_id = $1
+      FROM google_play_purchase_tokens
+      WHERE purchase_token = $1
       LIMIT 1
     `,
     [token],

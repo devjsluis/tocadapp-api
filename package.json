@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test tests/*.test.cjs",
+    "reconcile:google-play": "node dist/scripts/reconcileGooglePlayRtdn.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js"

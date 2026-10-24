@@ -1,6 +1,7 @@
 import { GOOGLE_PLAY_PACKAGE_NAME } from "../lib/googlePlay";
 import {
   findGooglePlaySubscriptionOwner,
+  getGooglePlaySubscription,
   syncGooglePlaySubscription,
 } from "./googlePlaySubscription.service";
 
@@ -31,8 +32,9 @@ export type GooglePlayRtdnResult =
     }
   | {
       kind: "IGNORED";
-      reason: "UNSUPPORTED_NOTIFICATION" | "UNKNOWN_PURCHASE_TOKEN";
-    };
+      reason: "UNSUPPORTED_NOTIFICATION";
+    }
+  | { kind: "DEFERRED"; reason: string };
 
 const decodeDeveloperNotification = (
   encodedData: string,
@@ -101,25 +103,111 @@ export const processGooglePlayRtdn = async (
     throw new Error("GOOGLE_PLAY_RTDN_NOTIFICATION_TYPE_REQUIRED");
   }
 
-  const userId =
-    await findGooglePlaySubscriptionOwner(purchaseToken);
+  const { query } = await import("../lib/db");
+  // Persist before Google or entitlement work. A 200 for DEFERRED means the
+  // purchase is durably retained, never that it was assigned or acknowledged.
+  await query(
+    `INSERT INTO google_play_rtdn_purchases (purchase_token, notification_type)
+     VALUES ($1, $2)
+     ON CONFLICT (purchase_token) DO UPDATE
+     SET notification_type = EXCLUDED.notification_type,
+         received_at = NOW(), status = 'RECEIVED', version = google_play_rtdn_purchases.version + 1`,
+    [purchaseToken, notificationType],
+  );
+  return processPersistedPurchase(purchaseToken, notificationType);
+};
 
-  if (!userId) {
-    return {
-      kind: "IGNORED",
-      reason: "UNKNOWN_PURCHASE_TOKEN",
-    };
-  }
-
-  await syncGooglePlaySubscription({
-    userId,
-    purchaseToken,
-  });
-
-  return {
-    kind: "SUBSCRIPTION",
-    notificationType,
-    purchaseToken,
-    userId,
+const processPersistedPurchase = async (
+  purchaseToken: string,
+  notificationType: number,
+): Promise<GooglePlayRtdnResult> => {
+  const { query } = await import("../lib/db");
+  const attempt = await query<{ version: string }>(
+    `UPDATE google_play_rtdn_purchases
+     SET version = version + 1, attempts = attempts + 1, last_attempt_at = NOW()
+     WHERE purchase_token = $1 RETURNING version`,
+    [purchaseToken],
+  );
+  const version = attempt.rows[0]!.version;
+  let snapshot: Awaited<ReturnType<typeof getGooglePlaySubscription>> | null = null;
+  const finish = async (status: string, reason: string | null, userId: number | null = null) => {
+    // An older attempt cannot overwrite a newer receipt/attempt's result.
+    await query(
+      `UPDATE google_play_rtdn_purchases
+       SET status = $3, reason = $4, google_snapshot = $5::jsonb, user_id = $6
+       WHERE purchase_token = $1 AND version = $2`,
+      [purchaseToken, version, status, reason, snapshot ? JSON.stringify(snapshot) : null, userId],
+    );
   };
+  const defer = async (reason: string) => {
+    await finish("DEFERRED", reason);
+    return { kind: "DEFERRED" as const, reason };
+  };
+
+  try {
+    snapshot = await getGooglePlaySubscription(purchaseToken);
+    // Pending purchases legitimately lack start/expiry dates. Retain them,
+    // without granting access or attempting acknowledgement.
+    if (
+      snapshot.subscriptionState === "SUBSCRIPTION_STATE_PENDING" ||
+      snapshot.subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED"
+    ) {
+      return await defer("PENDING_PURCHASE");
+    }
+
+    const anchors = [...new Set([
+      purchaseToken,
+      snapshot.linkedPurchaseToken,
+      snapshot.outOfAppPurchaseContext?.expiredPurchaseToken,
+    ].filter((token): token is string => Boolean(token)))];
+    const owners = await Promise.all(anchors.map(findGooglePlaySubscriptionOwner));
+    const knownOwners = [...new Set(owners.filter((owner): owner is number => owner !== null))];
+    if (knownOwners.length > 1) return await defer("OWNER_CONFLICT");
+    if (knownOwners.length === 0) return await defer("OWNER_UNKNOWN");
+
+    // externalAccountIdentifiers and expiredExternalAccountIdentifiers are
+    // retained in google_snapshot. There is currently no server-issued mapping
+    // to TocadApp users: never interpret these values as user IDs or emails.
+    const userId = knownOwners[0]!;
+    await syncGooglePlaySubscription({ userId, purchaseToken });
+    await finish("PROCESSED", null, userId);
+    return { kind: "SUBSCRIPTION", notificationType, purchaseToken, userId };
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "UNKNOWN_ERROR";
+    if ([
+      "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED",
+      "GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN",
+      "USER_NOT_FOUND",
+    ].includes(code)) {
+      return await defer(code);
+    }
+    await finish("RETRY", "PROCESSING_FAILED");
+    throw error; // Controller returns 500, preserving Pub/Sub retries.
+  }
+};
+
+// Explicit reconciliation entry point: always fetch Google again, never replay
+// a stored entitlement snapshot. Failures remain persisted for a later batch.
+export const reconcilePendingGooglePlayRtdn = async (limit = 100) => {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    throw new Error("GOOGLE_PLAY_INVALID_RECONCILIATION_LIMIT");
+  }
+  const { query } = await import("../lib/db");
+  const pending = await query<{ purchase_token: string; notification_type: number }>(
+    `SELECT purchase_token, notification_type FROM google_play_rtdn_purchases
+     WHERE status <> 'PROCESSED'
+     ORDER BY last_attempt_at ASC NULLS FIRST, purchase_token LIMIT $1`,
+    [limit],
+  );
+  const summary = { processed: 0, deferred: 0, failed: 0 };
+  for (const row of pending.rows) {
+    try {
+      const result = await processPersistedPurchase(row.purchase_token, row.notification_type);
+      if (result.kind === "SUBSCRIPTION") summary.processed++;
+      else summary.deferred++;
+    } catch {
+      summary.failed++;
+    }
+  }
+  return summary;
 };

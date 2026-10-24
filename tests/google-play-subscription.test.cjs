@@ -1,102 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const ts = require('typescript');
+const { harness } = require('./helpers/google-play.cjs');
 
-// Run the actual service, replacing only Google and the database transport.
-// This suite never loads credentials, opens a database, or makes HTTP requests.
-function harness(initial = []) {
-  let subscriptions = structuredClone(initial);
-  let owners = initial.map(row => ({ purchase_token: row.token, user_id: row.user_id, replaced_by_token: null }));
-  let snapshot;
-  let nextId = 100;
-  const calls = [];
-  const acknowledged = [];
-  const purchases = new Map();
-  const rowResult = rows => ({ rows, rowCount: rows.length });
-  const client = {
-    async query(sql, args = []) {
-      sql = sql.replace(/\s+/g, ' ').trim();
-      calls.push({ sql, args });
-      if (sql === 'BEGIN') { snapshot = structuredClone({ subscriptions, owners }); return rowResult([]); }
-      if (sql === 'COMMIT') return rowResult([]);
-      if (sql === 'ROLLBACK') { ({ subscriptions, owners } = snapshot); return rowResult([]); }
-      if (sql.includes('pg_advisory_xact_lock')) return rowResult([]);
-      if (sql.includes('FROM users')) return rowResult([{ id: args[0] }]);
-      if (sql.includes('FROM google_play_purchase_tokens')) return rowResult(owners.filter(row => args[0].includes(row.purchase_token)).map(row => ({ ...row })));
-      if (sql.includes('FROM plans')) return rowResult([{ id: '1', price_amount: 7900, currency: 'MXN' }]);
-      if (sql.includes('SELECT id, user_id FROM subscriptions')) return rowResult(subscriptions.filter(row => row.token === args[0]).map(row => ({ ...row })));
-      if (sql.startsWith('INSERT INTO google_play_purchase_tokens')) {
-        if (!owners.some(row => row.purchase_token === args[0])) owners.push({ purchase_token: args[0], user_id: args[1], replaced_by_token: null });
-        return rowResult([]);
-      }
-      if (sql.startsWith('UPDATE google_play_purchase_tokens')) {
-        owners.filter(row => row.purchase_token === args[0] && row.user_id === args[2]).forEach(row => { row.replaced_by_token = args[1]; });
-        return rowResult([]);
-      }
-      if (sql.startsWith('UPDATE subscriptions') && sql.includes("WHERE provider = 'GOOGLE_PLAY'")) {
-        subscriptions.filter(row => row.token === args[0] && row.user_id === args[1]).forEach(row => { row.status = 'EXPIRED'; });
-        return rowResult([]);
-      }
-      if (sql.startsWith('UPDATE subscriptions') && sql.includes('AND NOT')) {
-        subscriptions.filter(row => row.user_id === args[0] && row.token !== args[1] && ['ACTIVE', 'PENDING', 'PAST_DUE'].includes(row.status)).forEach(row => { row.status = 'EXPIRED'; });
-        return rowResult([]);
-      }
-      if (sql.startsWith('SELECT id FROM subscriptions')) return rowResult(subscriptions.filter(row => row.user_id === args[0] && ['ACTIVE', 'PENDING', 'PAST_DUE'].includes(row.status)));
-      if (sql.startsWith('UPDATE subscriptions')) {
-        const row = subscriptions.find(row => Number(row.id) === args[9]);
-        Object.assign(row, { status: args[1], end: args[5] });
-        return rowResult([]);
-      }
-      if (sql.startsWith('INSERT INTO subscriptions')) {
-        if (subscriptions.some(row => row.token === args[3])) throw new Error('duplicate token');
-        if (['ACTIVE', 'PENDING', 'PAST_DUE'].includes(args[2]) && subscriptions.some(row => row.user_id === args[0] && ['ACTIVE', 'PENDING', 'PAST_DUE'].includes(row.status))) throw new Error('duplicate open subscription');
-        const row = { id: String(nextId++), user_id: args[0], token: args[3], status: args[2], end: args[7] };
-        subscriptions.push(row);
-        return rowResult([{ id: row.id }]);
-      }
-      throw new Error('Unexpected SQL: ' + sql);
-    },
-    release() {},
-  };
-  const google = {
-    GOOGLE_PLAY_PACKAGE_NAME: 'com.tocadapp.mobile',
-    GOOGLE_PLAY_PRODUCT_ID: 'tocadapp_premium',
-    GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE: { monthly: 'TOCADAPP_MONTHLY', yearly: 'TOCADAPP_YEARLY' },
-    androidPublisher: { purchases: {
-      subscriptionsv2: { get: async ({ token, packageName }) => {
-        assert.equal(packageName, 'com.tocadapp.mobile');
-        if (!purchases.has(token)) throw new Error('GOOGLE_REJECTED_TOKEN');
-        return { data: purchases.get(token) };
-      } },
-      subscriptions: { acknowledge: async ({ token }) => { acknowledged.push(token); } },
-    } },
-  };
-  const filename = path.resolve(__dirname, '../src/services/googlePlaySubscription.service.ts');
-  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
-  }).outputText;
-  const module = { exports: {} };
-  const localRequire = name => {
-    if (name === '../lib/googlePlay') return google;
-    if (name === '../lib/db') return { pool: { connect: async () => client } };
-    throw new Error('Unexpected dependency: ' + name);
-  };
-  vm.runInNewContext('(function(require,module,exports){' + code + '\n})', { Date })(localRequire, module, module.exports);
-  function purchase(token, linkedPurchaseToken, state = 'ACTIVE') {
-    purchases.set(token, {
-      subscriptionState: 'SUBSCRIPTION_STATE_' + state,
-      acknowledgementState: 'ACKNOWLEDGEMENT_STATE_PENDING',
-      startTime: '2025-01-01T00:00:00Z',
-      linkedPurchaseToken,
-      lineItems: [{ productId: 'tocadapp_premium', offerDetails: { basePlanId: 'monthly' }, expiryTime: '2099-01-01T00:00:00Z', autoRenewingPlan: { autoRenewEnabled: true } }],
-    });
-  }
-  return { sync: module.exports.syncGooglePlaySubscription, purchase, purchases, calls, acknowledged,
-    rows: () => subscriptions, owners: () => owners };
-}
 const oldRow = { id: '1', user_id: 1, token: 'old', status: 'ACTIVE' };
 
 test('same owner replaces old token atomically and acknowledges new purchase', async () => {
@@ -227,4 +132,37 @@ test('disconnected fragments of a chain cannot acquire separate owners', async (
   await assert.rejects(h.sync({ userId: 2, purchaseToken: 'latest' }), { message: 'GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN' });
   assert.deepEqual(h.rows().filter(row => row.status === 'ACTIVE').map(row => row.user_id), [1]);
   assert.ok(h.owners().every(row => row.user_id === 1));
+});
+
+
+test('expired purchase anchor cannot transfer an out-of-app resubscription to another account', async () => {
+  const h = harness([{ ...oldRow, status: 'EXPIRED' }]); h.purchase('new');
+  h.purchases.get('new').outOfAppPurchaseContext = { expiredPurchaseToken: 'old' };
+  await assert.rejects(h.sync({ userId: 2, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED' });
+  assert.deepEqual(h.rows(), [{ ...oldRow, status: 'EXPIRED' }]); assert.deepEqual(h.acknowledged, []);
+});
+
+test('unknown expired purchase anchor is not assigned to the authenticated caller', async () => {
+  const h = harness(); h.purchase('new');
+  h.purchases.get('new').outOfAppPurchaseContext = { expiredPurchaseToken: 'unseen' };
+  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN' });
+  assert.equal(h.rows().length, 0); assert.equal(h.owners().length, 0);
+});
+
+test('state is refreshed under token locks before entitlement writes', async () => {
+  const h = harness([oldRow]); h.purchase('old');
+  h.faults.beforeGet = async () => {
+    if (h.getCalls.length === 2) h.purchases.get('old').subscriptionState = 'SUBSCRIPTION_STATE_ON_HOLD';
+  };
+  assert.equal((await h.sync({ userId: 1, purchaseToken: 'old' })).status, 'PAST_DUE');
+  assert.equal(h.rows()[0].status, 'PAST_DUE'); assert.deepEqual(h.acknowledged, []);
+});
+
+test('changed ancestry while acquiring locks aborts instead of using an unlocked anchor', async () => {
+  const h = harness([oldRow]); h.purchase('new', 'old');
+  h.faults.beforeGet = async () => {
+    if (h.getCalls.length === 2) h.purchases.get('new').linkedPurchaseToken = 'other';
+  };
+  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_PURCHASE_LINK_CHANGED' });
+  assert.deepEqual(h.rows(), [oldRow]); assert.equal(h.owners().length, 1);
 });
