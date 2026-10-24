@@ -5,12 +5,13 @@ const vm = require('node:vm');
 const ts = require('typescript');
 
 // Run the actual service, replacing only Google and the database transport.
-// This suite never loads credentials, opens a database, or makes HTTP requests.
-function harness(initial = []) {
+// No credentials or HTTP requests. PostgreSQL tests may explicitly supply an isolated pool.
+function harness(initial = [], options = {}) {
   let subscriptions = structuredClone(initial);
   let owners = initial.map(row => ({ purchase_token: row.token, user_id: row.user_id, replaced_by_token: null }));
   let snapshot;
   let inbox = new Map();
+  let jobs = new Map();
   const faults = {};
   const getCalls = [];
   let nextId = 100;
@@ -22,10 +23,28 @@ function harness(initial = []) {
     async query(sql, args = []) {
       sql = sql.replace(/\s+/g, ' ').trim();
       calls.push({ sql, args });
-      if (sql === 'BEGIN') { snapshot = structuredClone({ subscriptions, owners, inbox }); return rowResult([]); }
+      if (sql === 'BEGIN') { snapshot = structuredClone({ subscriptions, owners, inbox, jobs }); return rowResult([]); }
       if (sql === 'COMMIT') return rowResult([]);
-      if (sql === 'ROLLBACK') { ({ subscriptions, owners, inbox } = snapshot); return rowResult([]); }
+      if (sql === 'ROLLBACK') { ({ subscriptions, owners, inbox, jobs } = snapshot); return rowResult([]); }
       if (sql.includes('pg_advisory_xact_lock')) return rowResult([]);
+      if (sql.startsWith('INSERT INTO google_play_acknowledgements')) {
+        const candidates = sql.includes('SELECT t.purchase_token')
+          ? owners.filter(owner => subscriptions.some(row => row.token === owner.purchase_token && row.user_id === owner.user_id)).map(row => [row.purchase_token, row.user_id])
+          : [args];
+        for (const [token, userId] of candidates) if (!jobs.has(token)) jobs.set(token, { purchase_token: token, user_id: userId, status: 'PENDING', attempts: 0 });
+        return rowResult([]);
+      }
+      if (sql.startsWith('UPDATE google_play_acknowledgements')) {
+        if (faults.finish && args[1] === 'COMPLETED') { const error = faults.finish; delete faults.finish; throw error; }
+        const row = jobs.get(args[0]);
+        if (row && (!sql.includes("status IN") || ['PENDING','RETRY','DEFERRED'].includes(row.status))) {
+          Object.assign(row, { status: args[1] || 'RETRY', reason: args[2] || (args[1] ? null : 'ACKNOWLEDGEMENT_FAILED'), attempts: row.attempts + 1, last_attempt_at: Date.now(), completed_at: args[1] === 'COMPLETED' ? Date.now() : null });
+        }
+        return rowResult([]);
+      }
+      if (sql.includes('FROM google_play_acknowledgements')) {
+        return rowResult(sql.includes('FOR UPDATE') ? [...jobs.values()].filter(row => row.purchase_token === args[0]) : [...jobs.values()].filter(row => ['PENDING','RETRY','DEFERRED'].includes(row.status)).slice(0,args[0]));
+      }
       if (sql.startsWith('INSERT INTO google_play_rtdn_purchases')) {
         const row = inbox.get(args[0]);
         if (row) Object.assign(row, { notification_type: args[1], status: 'RECEIVED', version: row.version + 1 });
@@ -93,7 +112,13 @@ function harness(initial = []) {
         if (!purchases.has(token)) throw new Error('GOOGLE_REJECTED_TOKEN');
         return { data: purchases.get(token) };
       } },
-      subscriptions: { acknowledge: async ({ token }) => { if (faults.ack) throw faults.ack; acknowledged.push(token); } },
+      subscriptions: { acknowledge: async ({ token }) => {
+        if (faults.beforeAck) await faults.beforeAck(token);
+        if (faults.ack) throw faults.ack;
+        acknowledged.push(token);
+        purchases.get(token).acknowledgementState = 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED';
+        if (faults.afterAck) await faults.afterAck(token);
+      } },
     } },
   };
   const modules = new Map();
@@ -106,8 +131,8 @@ function harness(initial = []) {
     const module = { exports: {} }; modules.set(name, module);
     const localRequire = name => {
       if (name === '../lib/googlePlay') return google;
-      if (name === '../lib/db') return { pool: { connect: async () => client }, query: (...args) => client.query(...args) };
-      if (name === './googlePlaySubscription.service') return loadService('googlePlaySubscription');
+      if (name === '../lib/db') return options.pool ? { pool: options.pool, query: (...args) => options.pool.query(...args) } : { pool: { connect: async () => client }, query: (...args) => client.query(...args) };
+      if (name.startsWith('./') && name.endsWith('.service')) return loadService(name.slice(2, -8));
       throw new Error('Unexpected dependency: ' + name);
     };
     vm.runInNewContext('(function(require,module,exports){' + code + '\n})', { Date, Buffer, Error })(localRequire, module, module.exports);
@@ -115,6 +140,7 @@ function harness(initial = []) {
   }
   const subscriptionService = loadService('googlePlaySubscription');
   const rtdnService = loadService('googlePlayRtdn');
+  const ackService = loadService('googlePlayAcknowledgement');
   function purchase(token, linkedPurchaseToken, state = 'ACTIVE') {
     purchases.set(token, {
       subscriptionState: 'SUBSCRIPTION_STATE_' + state,
@@ -124,7 +150,7 @@ function harness(initial = []) {
       lineItems: [{ productId: 'tocadapp_premium', offerDetails: { basePlanId: 'monthly' }, expiryTime: '2099-01-01T00:00:00Z', autoRenewingPlan: { autoRenewEnabled: true } }],
     });
   }
-  return { sync: subscriptionService.syncGooglePlaySubscription, process: rtdnService.processGooglePlayRtdn, reconcile: rtdnService.reconcilePendingGooglePlayRtdn, faults, getCalls, inbox: () => inbox, purchase, purchases, calls, acknowledged,
+  return { ack: ackService.acknowledgeSavedGooglePlayPurchase, reconcileAck: ackService.reconcileGooglePlayAcknowledgements, jobs: () => jobs, sync: subscriptionService.syncGooglePlaySubscription, process: rtdnService.processGooglePlayRtdn, reconcile: rtdnService.reconcilePendingGooglePlayRtdn, faults, getCalls, inbox: () => inbox, purchase, purchases, calls, acknowledged,
     rows: () => subscriptions, owners: () => owners };
 }
 

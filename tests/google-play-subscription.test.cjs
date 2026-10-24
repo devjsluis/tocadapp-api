@@ -92,7 +92,8 @@ test('failed insert rolls back predecessor retirement and token reservations', a
 test('token locks are ordered and acquired before the user lock', async () => {
   const h = harness([{ id: '1', user_id: 1, token: 'a-old', status: 'ACTIVE' }]); h.purchase('z-new', 'a-old'); await h.sync({ userId: 1, purchaseToken: 'z-new' });
   const locks = h.calls.filter(call => call.sql.includes('pg_advisory_xact_lock'));
-  assert.deepEqual(locks.map(call => call.args[0]), ['a-old', 'z-new']);
+  assert.deepEqual(locks.map(call => call.args[0]), ['a-old', 'z-new', 'a-old', 'z-new']);
+  // Both the entitlement transaction and the acknowledgement transaction lock in order.
   assert.ok(h.calls.indexOf(locks[1]) < h.calls.findIndex(call => call.sql.includes('FROM users')));
 });
 

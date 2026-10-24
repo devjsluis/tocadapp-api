@@ -177,6 +177,7 @@ export const syncGooglePlaySubscription = async ({
   const { pool } = await import("../lib/db");
   const client = await pool.connect();
   let transactionCommitted = false;
+  let clientReleased = false;
 
   try {
     await client.query("BEGIN");
@@ -510,29 +511,29 @@ export const syncGooglePlaySubscription = async ({
       subscriptionId = Number(insertResult.rows[0].id);
     }
 
-    await client.query("COMMIT");
-    transactionCommitted = true;
-
     const canAcknowledge =
-      verified.acknowledgementState ===
-        "ACKNOWLEDGEMENT_STATE_PENDING" &&
-      (
-        verified.subscriptionState === "SUBSCRIPTION_STATE_ACTIVE" ||
-        verified.subscriptionState ===
-          "SUBSCRIPTION_STATE_IN_GRACE_PERIOD" ||
-        (
-          verified.subscriptionState === "SUBSCRIPTION_STATE_CANCELED" &&
-          verified.expiryTime.getTime() > Date.now()
-        )
-      );
+      verified.acknowledgementState === "ACKNOWLEDGEMENT_STATE_PENDING" &&
+      verified.expiryTime.getTime() > Date.now() &&
+      ["SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD",
+       "SUBSCRIPTION_STATE_CANCELED"].includes(verified.subscriptionState);
 
     if (canAcknowledge) {
-      await androidPublisher.purchases.subscriptions.acknowledge({
-        packageName: GOOGLE_PLAY_PACKAGE_NAME,
-        subscriptionId: GOOGLE_PLAY_PRODUCT_ID,
-        token: verified.purchaseToken,
-        requestBody: {},
-      });
+      await client.query(
+        `INSERT INTO google_play_acknowledgements (purchase_token, user_id)
+         VALUES ($1, $2) ON CONFLICT (purchase_token) DO NOTHING`,
+        [verified.purchaseToken, userId],
+      );
+    }
+    await client.query("COMMIT");
+    transactionCommitted = true;
+    // The acknowledgement worker needs its own transaction/connection.
+    client.release();
+    clientReleased = true;
+
+    let acknowledged = false;
+    if (canAcknowledge) {
+      const { acknowledgeSavedGooglePlayPurchase } = await import("./googlePlayAcknowledgement.service");
+      acknowledged = await acknowledgeSavedGooglePlayPurchase(verified.purchaseToken, userId);
     }
 
     return {
@@ -541,7 +542,7 @@ export const syncGooglePlaySubscription = async ({
       planCode: verified.planCode,
       currentPeriodEnd: verified.expiryTime,
       cancelAtPeriodEnd,
-      acknowledgementState: canAcknowledge
+      acknowledgementState: acknowledged
         ? "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED"
         : verified.acknowledgementState,
       isTestPurchase: verified.isTestPurchase,
@@ -553,7 +554,7 @@ export const syncGooglePlaySubscription = async ({
 
     throw error;
   } finally {
-    client.release();
+    if (!clientReleased) client.release();
   }
 };
 
