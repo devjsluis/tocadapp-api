@@ -12,11 +12,14 @@ function harness(initial = [], options = {}) {
   let snapshot;
   let inbox = new Map();
   let jobs = new Map();
+  let recovery = new Map();
+  const identities = new Map([["a".repeat(32), 1], ["b".repeat(32), 2]]);
   const faults = {};
   const getCalls = [];
   let nextId = 100;
   const calls = [];
   const acknowledged = [];
+  const acknowledgementProducts = [];
   const purchases = new Map();
   const rowResult = rows => ({ rows, rowCount: rows.length });
   const client = {
@@ -26,6 +29,22 @@ function harness(initial = [], options = {}) {
       if (sql === 'BEGIN') { snapshot = structuredClone({ subscriptions, owners, inbox, jobs }); return rowResult([]); }
       if (sql === 'COMMIT') return rowResult([]);
       if (sql === 'ROLLBACK') { ({ subscriptions, owners, inbox, jobs } = snapshot); return rowResult([]); }
+      if (sql.startsWith('INSERT INTO google_play_purchase_recovery')) {
+        let row = recovery.get(args[0]);
+        if (row) Object.assign(row, { version: row.version + 1, attempts: row.attempts + 1, status: 'RETRY' });
+        else { row = { purchase_token: args[0], user_id: null, version: 1, attempts: 1, status: 'RETRY' }; recovery.set(args[0], row); }
+        return rowResult([{ version: String(row.version) }]);
+      }
+      if (sql.startsWith('UPDATE google_play_purchase_recovery')) {
+        const row = recovery.get(args[0]);
+        if (row.version === Number(args[1])) Object.assign(row, { status: args[2], reason: args[3], user_id: args[4] ?? row.user_id, purchase_state: args[5] ?? row.purchase_state });
+        return rowResult([]);
+      }
+      if (sql.includes('FROM google_play_purchase_recovery')) return rowResult([...recovery.values()].filter(row => row.status !== 'PROCESSED').slice(0, args[0]));
+      if (sql.includes('FROM google_play_billing_identities')) {
+        if (sql.includes('JOIN users')) return rowResult([...identities].filter(([, userId]) => userId === args[0]).map(([identity]) => ({ obfuscated_account_id: identity })));
+        return rowResult(identities.has(args[0]) ? [{ user_id: identities.get(args[0]) }] : []);
+      }
       if (sql.includes('pg_advisory_xact_lock')) return rowResult([]);
       if (sql.startsWith('INSERT INTO google_play_acknowledgements')) {
         const candidates = sql.includes('SELECT t.purchase_token')
@@ -101,8 +120,6 @@ function harness(initial = [], options = {}) {
   };
   const google = {
     GOOGLE_PLAY_PACKAGE_NAME: 'com.tocadapp.mobile',
-    GOOGLE_PLAY_PRODUCT_ID: 'tocadapp_premium',
-    GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE: { monthly: 'TOCADAPP_MONTHLY', yearly: 'TOCADAPP_YEARLY' },
     androidPublisher: { purchases: {
       subscriptionsv2: { get: async ({ token, packageName }) => {
         assert.equal(packageName, 'com.tocadapp.mobile');
@@ -110,9 +127,11 @@ function harness(initial = [], options = {}) {
         if (faults.beforeGet) await faults.beforeGet(token);
         if (faults.google) throw faults.google;
         if (!purchases.has(token)) throw new Error('GOOGLE_REJECTED_TOKEN');
-        return { data: purchases.get(token) };
+        return { data: structuredClone(purchases.get(token)) };
       } },
-      subscriptions: { acknowledge: async ({ token }) => {
+      subscriptions: { acknowledge: async ({ token, subscriptionId }) => {
+        assert.equal(subscriptionId, purchases.get(token).lineItems[0].productId);
+        acknowledgementProducts.push(subscriptionId);
         if (faults.beforeAck) await faults.beforeAck(token);
         if (faults.ack) throw faults.ack;
         acknowledged.push(token);
@@ -132,6 +151,7 @@ function harness(initial = [], options = {}) {
     const localRequire = name => {
       if (name === '../lib/googlePlay') return google;
       if (name === '../lib/db') return options.pool ? { pool: options.pool, query: (...args) => options.pool.query(...args) } : { pool: { connect: async () => client }, query: (...args) => client.query(...args) };
+      if (name === 'crypto' || name === 'node:crypto') return require(name);
       if (name.startsWith('./') && name.endsWith('.service')) return loadService(name.slice(2, -8));
       throw new Error('Unexpected dependency: ' + name);
     };
@@ -141,6 +161,7 @@ function harness(initial = [], options = {}) {
   const subscriptionService = loadService('googlePlaySubscription');
   const rtdnService = loadService('googlePlayRtdn');
   const ackService = loadService('googlePlayAcknowledgement');
+  const recoveryService = loadService('googlePlayRecovery');
   function purchase(token, linkedPurchaseToken, state = 'ACTIVE') {
     purchases.set(token, {
       subscriptionState: 'SUBSCRIPTION_STATE_' + state,
@@ -150,7 +171,10 @@ function harness(initial = [], options = {}) {
       lineItems: [{ productId: 'tocadapp_premium', offerDetails: { basePlanId: 'monthly' }, expiryTime: '2099-01-01T00:00:00Z', autoRenewingPlan: { autoRenewEnabled: true } }],
     });
   }
-  return { ack: ackService.acknowledgeSavedGooglePlayPurchase, reconcileAck: ackService.reconcileGooglePlayAcknowledgements, jobs: () => jobs, sync: subscriptionService.syncGooglePlaySubscription, process: rtdnService.processGooglePlayRtdn, reconcile: rtdnService.reconcilePendingGooglePlayRtdn, faults, getCalls, inbox: () => inbox, purchase, purchases, calls, acknowledged,
+  function identify(token, userId = 1) {
+    purchases.get(token).externalAccountIdentifiers = { obfuscatedExternalAccountId: userId === 1 ? 'a'.repeat(32) : 'b'.repeat(32) };
+  }
+  return { acknowledgementProducts, identify, identities, recovery: () => recovery, recover: recoveryService.recoverGooglePlayPurchase, reconcilePurchases: recoveryService.reconcileGooglePlayPurchases, ack: ackService.acknowledgeSavedGooglePlayPurchase, reconcileAck: ackService.reconcileGooglePlayAcknowledgements, jobs: () => jobs, sync: subscriptionService.syncGooglePlaySubscription, process: rtdnService.processGooglePlayRtdn, reconcile: rtdnService.reconcilePendingGooglePlayRtdn, faults, getCalls, inbox: () => inbox, purchase, purchases, calls, acknowledged,
     rows: () => subscriptions, owners: () => owners };
 }
 

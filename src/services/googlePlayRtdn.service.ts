@@ -1,3 +1,5 @@
+import { recoverGooglePlayPurchase } from "./googlePlayRecovery.service";
+import { googlePlayOwnershipErrors, resolveGooglePlayOwner } from "./googlePlayOwnership.service";
 import { GOOGLE_PLAY_PACKAGE_NAME } from "../lib/googlePlay";
 import {
   findGooglePlaySubscriptionOwner,
@@ -34,6 +36,7 @@ export type GooglePlayRtdnResult =
       kind: "IGNORED";
       reason: "UNSUPPORTED_NOTIFICATION";
     }
+  | { kind: "CANCELED" }
   | { kind: "DEFERRED"; reason: string };
 
 const decodeDeveloperNotification = (
@@ -146,15 +149,6 @@ const processPersistedPurchase = async (
 
   try {
     snapshot = await getGooglePlaySubscription(purchaseToken);
-    // Pending purchases legitimately lack start/expiry dates. Retain them,
-    // without granting access or attempting acknowledgement.
-    if (
-      snapshot.subscriptionState === "SUBSCRIPTION_STATE_PENDING" ||
-      snapshot.subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED"
-    ) {
-      return await defer("PENDING_PURCHASE");
-    }
-
     const anchors = [...new Set([
       purchaseToken,
       snapshot.linkedPurchaseToken,
@@ -163,22 +157,24 @@ const processPersistedPurchase = async (
     const owners = await Promise.all(anchors.map(findGooglePlaySubscriptionOwner));
     const knownOwners = [...new Set(owners.filter((owner): owner is number => owner !== null))];
     if (knownOwners.length > 1) return await defer("OWNER_CONFLICT");
-    if (knownOwners.length === 0) return await defer("OWNER_UNKNOWN");
-
-    // externalAccountIdentifiers and expiredExternalAccountIdentifiers are
-    // retained in google_snapshot. There is currently no server-issued mapping
-    // to TocadApp users: never interpret these values as user IDs or emails.
-    const userId = knownOwners[0]!;
-    await syncGooglePlaySubscription({ userId, purchaseToken });
+    const userId = await resolveGooglePlayOwner(snapshot,
+      owners.flatMap((owner, index) => owner === null ? [] : [{ purchase_token: anchors[index]!, user_id: owner }]),
+      { query });
+    if (userId === null) {
+      if (snapshot.subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED") {
+        await recoverGooglePlayPurchase(purchaseToken);
+        await finish("PROCESSED", null);
+        return { kind: "CANCELED" };
+      }
+      return await defer("OWNER_UNKNOWN");
+    }
+    const result = await syncGooglePlaySubscription({ userId, purchaseToken });
+    if (result.purchaseResult.state === "PENDING") return await defer("PENDING_PURCHASE");
     await finish("PROCESSED", null, userId);
     return { kind: "SUBSCRIPTION", notificationType, purchaseToken, userId };
   } catch (error) {
     const code = error instanceof Error ? error.message : "UNKNOWN_ERROR";
-    if ([
-      "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED",
-      "GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN",
-      "USER_NOT_FOUND",
-    ].includes(code)) {
+    if (googlePlayOwnershipErrors.has(code)) {
       return await defer(code);
     }
     await finish("RETRY", "PROCESSING_FAILED");
@@ -203,7 +199,7 @@ export const reconcilePendingGooglePlayRtdn = async (limit = 100) => {
   for (const row of pending.rows) {
     try {
       const result = await processPersistedPurchase(row.purchase_token, row.notification_type);
-      if (result.kind === "SUBSCRIPTION") summary.processed++;
+      if (result.kind === "SUBSCRIPTION" || result.kind === "CANCELED") summary.processed++;
       else summary.deferred++;
     } catch {
       summary.failed++;

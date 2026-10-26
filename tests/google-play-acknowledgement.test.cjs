@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { harness } = require('./helpers/google-play.cjs');
 
 async function failedPurchase() {
-  const h = harness(); h.purchase('paid'); h.faults.ack = Error('ACK_TIMEOUT');
+  const h = harness(); h.purchase('paid'); h.identify('paid'); h.faults.ack = Error('ACK_TIMEOUT');
   await assert.rejects(h.sync({userId: 1, purchaseToken: 'paid'}), {message: 'ACK_TIMEOUT'});
   delete h.faults.ack;
   return h;
@@ -27,7 +27,7 @@ test('post-COMMIT failure persists an acknowledgement obligation without RTDN', 
 });
 
 test('lost acknowledgement response is recovered by reading Google without a second ack', async () => {
-  const h = harness(); h.purchase('paid');
+  const h = harness(); h.purchase('paid'); h.identify('paid');
   h.faults.afterAck = () => { throw Error('LOST_RESPONSE'); };
   await assert.rejects(h.sync({userId:1,purchaseToken:'paid'}));
   assert.equal(h.jobs().get('paid').status, 'RETRY');
@@ -37,7 +37,7 @@ test('lost acknowledgement response is recovered by reading Google without a sec
 });
 
 test('failed local completion is recoverable after Google succeeds', async () => {
-  const h = harness(); h.purchase('paid'); h.faults.finish = Error('DB_WRITE_FAILED');
+  const h = harness(); h.purchase('paid'); h.identify('paid'); h.faults.finish = Error('DB_WRITE_FAILED');
   await assert.rejects(h.sync({userId:1,purchaseToken:'paid'}));
   assert.equal(h.jobs().get('paid').status, 'RETRY');
   assert.equal((await h.reconcileAck()).completed, 1);
@@ -82,7 +82,7 @@ test('historical discovery checks Google without activating locally expired acce
 });
 
 test('failed subscription transaction rolls back the acknowledgement obligation too', async () => {
-  const h = harness(); h.purchase('paid');
+  const h = harness(); h.purchase('paid'); h.identify('paid');
   const push = h.calls.push;
   h.calls.push = function(call) {
     if (call.sql === 'COMMIT') throw Error('COMMIT_FAILED');
@@ -93,7 +93,7 @@ test('failed subscription transaction rolls back the acknowledgement obligation 
 });
 
 
-test('the existing reconciliation command runs both queues and reports failures', async () => {
+test('the existing reconciliation command loads environment first, runs all queues and reports failures', async () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const vm = require('node:vm');
@@ -104,14 +104,16 @@ test('the existing reconciliation command runs both queues and reports failures'
   for (const failed of [0,1]) {
     const events = []; const process = {};
     const require = name => {
-      if (name === 'dotenv/config') return {};
+      if (name === 'dotenv/config') { events.push('env'); return {}; }
+      assert.equal(events[0],'env','load environment before any database-backed service');
       if (name === '../lib/db') return {pool:{end:async()=>{events.push('end');}}};
       if (name === '../services/googlePlayAcknowledgement.service') return {reconcileGooglePlayAcknowledgements:async()=>{events.push('ack');return {completed:1,deferred:0,failed};}};
+      if (name === '../services/googlePlayRecovery.service') return {reconcileGooglePlayPurchases:async()=>{events.push('purchases');return {processed:1,pending:0,deferred:0,failed:0};}};
       if (name === '../services/googlePlayRtdn.service') return {reconcilePendingGooglePlayRtdn:async()=>{events.push('rtdn');return {processed:1,deferred:0,failed:0};}};
       throw Error('Unexpected import '+name);
     };
     await vm.runInNewContext(code,{require,exports:{},process,console:{log(){},error(){}}});
-    assert.deepEqual(events,['ack','rtdn','end']);
+    assert.deepEqual(events,['env','ack','purchases','rtdn','end']);
     assert.equal(process.exitCode,failed ? 1 : undefined);
   }
 });

@@ -19,7 +19,8 @@ test('different owner cannot claim a linked purchase and does not acknowledge', 
   const h = harness([oldRow]); h.purchase('new', 'old');
   await assert.rejects(h.sync({ userId: 2, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED' });
   assert.deepEqual(h.rows(), [oldRow]); assert.equal(h.owners().length, 1);
-  assert.deepEqual(h.acknowledged, []); assert.equal(h.calls.at(-1).sql, 'ROLLBACK');
+  assert.deepEqual(h.acknowledged, []); assert.ok(h.calls.some(call => call.sql === 'ROLLBACK'));
+  assert.equal(h.recovery().get('new').status, 'DEFERRED');
 });
 
 for (const state of ['ACTIVE', 'CANCELED', 'IN_GRACE_PERIOD', 'EXPIRED']) {
@@ -35,7 +36,7 @@ for (const state of ['ACTIVE', 'CANCELED', 'IN_GRACE_PERIOD', 'EXPIRED']) {
 
 test('unseen predecessor is rejected without reserving either token', async () => {
   const h = harness(); h.purchase('new', 'old');
-  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN' });
+  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_OWNER_UNVERIFIABLE' });
   assert.equal(h.rows().length, 0); assert.equal(h.owners().length, 0);
   assert.deepEqual(h.acknowledged, []);
 });
@@ -59,7 +60,7 @@ test('a competing successor cannot replace a token already replaced', async () =
 });
 
 test('initial purchase, renewal and duplicate processing keep a single token row', async () => {
-  const h = harness(); h.purchase('initial');
+  const h = harness(); h.purchase('initial'); h.identify('initial');
   await h.sync({ userId: 1, purchaseToken: 'initial' });
   h.purchases.get('initial').acknowledgementState = 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED';
   await h.sync({ userId: 1, purchaseToken: 'initial' });
@@ -72,7 +73,7 @@ test('Google rejection or invalid product cannot mutate ownership', async () => 
   await assert.rejects(h.sync({ userId: 1, purchaseToken: 'invalid' }), { message: 'GOOGLE_REJECTED_TOKEN' });
   h.purchase('new', 'old'); h.purchases.get('new').lineItems[0].productId = 'wrong';
   await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_INVALID_PRODUCT' });
-  assert.deepEqual(h.rows(), [oldRow]); assert.equal(h.owners().length, 1); assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.rows(), [oldRow]); assert.equal(h.owners().length, 1); assert.ok(h.calls.every(call => call.sql.includes('google_play_purchase_recovery')));
 });
 
 test('failed insert rolls back predecessor retirement and token reservations', async () => {
@@ -130,7 +131,7 @@ test('disconnected fragments of a chain cannot acquire separate owners', async (
   const h = harness([oldRow]);
   h.purchase('middle', 'old'); h.purchase('latest', 'unseen-middle');
   await h.sync({ userId: 1, purchaseToken: 'middle' });
-  await assert.rejects(h.sync({ userId: 2, purchaseToken: 'latest' }), { message: 'GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN' });
+  await assert.rejects(h.sync({ userId: 2, purchaseToken: 'latest' }), { message: 'GOOGLE_PLAY_OWNER_UNVERIFIABLE' });
   assert.deepEqual(h.rows().filter(row => row.status === 'ACTIVE').map(row => row.user_id), [1]);
   assert.ok(h.owners().every(row => row.user_id === 1));
 });
@@ -146,7 +147,7 @@ test('expired purchase anchor cannot transfer an out-of-app resubscription to an
 test('unknown expired purchase anchor is not assigned to the authenticated caller', async () => {
   const h = harness(); h.purchase('new');
   h.purchases.get('new').outOfAppPurchaseContext = { expiredPurchaseToken: 'unseen' };
-  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN' });
+  await assert.rejects(h.sync({ userId: 1, purchaseToken: 'new' }), { message: 'GOOGLE_PLAY_OWNER_UNVERIFIABLE' });
   assert.equal(h.rows().length, 0); assert.equal(h.owners().length, 0);
 });
 

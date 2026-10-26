@@ -1,34 +1,32 @@
-import {
-  androidPublisher,
-  GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE,
-  GOOGLE_PLAY_PACKAGE_NAME,
-  GOOGLE_PLAY_PRODUCT_ID,
-  type GooglePlayBasePlanId,
-  type GooglePlayPlanCode,
-} from "../lib/googlePlay";
+import { androidPublisher, GOOGLE_PLAY_PACKAGE_NAME } from "../lib/googlePlay";
+import { getGooglePlayPlan, type GooglePlayProductId, type GooglePlayBasePlanId, type GooglePlayPlanCode } from "./googlePlayCatalog.service";
+
+import { assertGooglePlayChainOwnership, googlePlayRecoveryErrorCode, resolveGooglePlayOwner, googlePlayOwnershipErrors } from "./googlePlayOwnership.service";
+import { beginGooglePlayRecovery, finishGooglePlayRecovery } from "./googlePlayRecovery.service";
+
+export type GooglePlayPurchaseResult = {
+  state: "PENDING" | "CANCELED" | "ACTIVE" | "INACTIVE" | "REPLACED";
+  subscriptionState: string;
+  acknowledgementState: string | null;
+  retryable: boolean;
+};
 
 export type VerifiedGooglePlaySubscription = {
   purchaseToken: string;
+  productId: GooglePlayProductId;
   planCode: GooglePlayPlanCode;
   basePlanId: GooglePlayBasePlanId;
   subscriptionState: string;
   acknowledgementState: string | null;
-  startTime: Date;
-  expiryTime: Date;
+  startTime: Date | null;
+  expiryTime: Date | null;
+  googleSnapshot: Awaited<ReturnType<typeof getGooglePlaySubscription>>;
   autoRenewEnabled: boolean;
   latestSuccessfulOrderId: string | null;
   linkedPurchaseToken: string | null;
   expiredPurchaseToken: string | null;
   isTestPurchase: boolean;
 };
-
-const isGooglePlayBasePlanId = (
-  value: string,
-): value is GooglePlayBasePlanId =>
-  Object.prototype.hasOwnProperty.call(
-    GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE,
-    value,
-  );
 
 const parseGoogleDate = (
   value: string | null | undefined,
@@ -69,15 +67,7 @@ export const getGooglePlaySubscription = async (purchaseToken: string) => {
 
   const lineItem = lineItems[0];
 
-  if (lineItem.productId !== GOOGLE_PLAY_PRODUCT_ID) {
-    throw new Error("GOOGLE_PLAY_INVALID_PRODUCT");
-  }
-
-  const basePlanId = lineItem.offerDetails?.basePlanId;
-
-  if (!basePlanId || !isGooglePlayBasePlanId(basePlanId)) {
-    throw new Error("GOOGLE_PLAY_INVALID_BASE_PLAN");
-  }
+  getGooglePlayPlan(lineItem.productId, lineItem.offerDetails?.basePlanId);
 
   const subscriptionState = purchase.subscriptionState;
 
@@ -93,21 +83,25 @@ export const verifyGooglePlaySubscription = async (
 ): Promise<VerifiedGooglePlaySubscription> => {
   const purchase = await getGooglePlaySubscription(purchaseToken);
   const lineItem = purchase.lineItems![0]!;
-  const basePlanId = lineItem.offerDetails!.basePlanId as GooglePlayBasePlanId;
+  const { productId, basePlanId, planCode } = getGooglePlayPlan(lineItem.productId, lineItem.offerDetails?.basePlanId);
   const subscriptionState = purchase.subscriptionState!;
-  const startTime = parseGoogleDate(
+  const awaitingPayment = subscriptionState === "SUBSCRIPTION_STATE_PENDING" ||
+    subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED";
+  const startTime = awaitingPayment ? null : parseGoogleDate(
     purchase.startTime,
     "GOOGLE_PLAY_START_TIME_MISSING",
   );
 
-  const expiryTime = parseGoogleDate(
+  const expiryTime = awaitingPayment ? null : parseGoogleDate(
     lineItem.expiryTime,
     "GOOGLE_PLAY_EXPIRY_TIME_MISSING",
   );
 
   return {
+    googleSnapshot: purchase,
     purchaseToken: purchaseToken.trim(),
-    planCode: GOOGLE_PLAY_BASE_PLAN_TO_PLAN_CODE[basePlanId],
+    productId,
+    planCode,
     basePlanId,
     subscriptionState,
     acknowledgementState: purchase.acknowledgementState ?? null,
@@ -139,7 +133,7 @@ type PlanRow = {
 const mapGooglePlayStatus = (
   verified: VerifiedGooglePlaySubscription,
 ): TocadAppSubscriptionStatus => {
-  const hasRemainingAccess = verified.expiryTime.getTime() > Date.now();
+  const hasRemainingAccess = (verified.expiryTime?.getTime() ?? 0) > Date.now();
 
   switch (verified.subscriptionState) {
     case "SUBSCRIPTION_STATE_ACTIVE":
@@ -165,7 +159,7 @@ const mapGooglePlayStatus = (
   }
 };
 
-export const syncGooglePlaySubscription = async ({
+const syncGooglePlaySubscriptionCore = async ({
   userId,
   purchaseToken,
 }: {
@@ -201,6 +195,8 @@ export const syncGooglePlaySubscription = async ({
     // Re-read while serialized before changing entitlements.
     const current = await verifyGooglePlaySubscription(purchaseToken);
     if (
+      current.productId !== verified.productId ||
+      current.basePlanId !== verified.basePlanId ||
       current.linkedPurchaseToken !== verified.linkedPurchaseToken ||
       current.expiredPurchaseToken !== verified.expiredPurchaseToken
     ) {
@@ -243,6 +239,10 @@ export const syncGooglePlaySubscription = async ({
       throw new Error("GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED");
     }
 
+    const verifiedOwner = await resolveGooglePlayOwner(verified.googleSnapshot, ownershipResult.rows, client);
+    if (verifiedOwner === null) throw new Error("GOOGLE_PLAY_OWNER_UNVERIFIABLE");
+    if (verifiedOwner !== userId) throw new Error("GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED");
+
     const currentOwnership = ownershipResult.rows.find(
       (row) => row.purchase_token === verified.purchaseToken,
     );
@@ -253,6 +253,7 @@ export const syncGooglePlaySubscription = async ({
       await client.query("COMMIT");
       transactionCommitted = true;
       return {
+        purchaseResult: purchaseResult(verified, "REPLACED"),
         subscriptionId: null,
         status: "EXPIRED" as const,
         planCode: verified.planCode,
@@ -263,28 +264,31 @@ export const syncGooglePlaySubscription = async ({
       };
     }
 
-    const linkedOwnership = ownershipResult.rows.find(
-      (row) => row.purchase_token === verified.linkedPurchaseToken,
+    assertGooglePlayChainOwnership(
+      verified.purchaseToken, verified.googleSnapshot, ownershipResult.rows, userId,
     );
-    // An unseen predecessor may itself link to another account's purchase.
-    // Do not assign a disconnected fragment of that chain to the caller.
-    if (verified.linkedPurchaseToken && !linkedOwnership) {
-      throw new Error("GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN");
-    }
 
-    if (
-      verified.expiredPurchaseToken &&
-      !ownershipResult.rows.some((row) => row.purchase_token === verified.expiredPurchaseToken)
-    ) {
-      throw new Error("GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN");
+    // Pending/canceled payments are work records, never entitlement rows.
+    // Keep the old subscription and replacement chain intact in both states.
+    if (verified.subscriptionState === "SUBSCRIPTION_STATE_PENDING" ||
+        verified.subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED") {
+      await client.query(
+        `INSERT INTO google_play_purchase_tokens (purchase_token, user_id)
+         VALUES ($1, $2) ON CONFLICT (purchase_token) DO NOTHING`,
+        [verified.purchaseToken, userId],
+      );
+      await client.query("COMMIT");
+      transactionCommitted = true;
+      const canceled = verified.subscriptionState === "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED";
+      return {
+        purchaseResult: purchaseResult(verified, canceled ? "CANCELED" : "PENDING"),
+        subscriptionId: null, status: canceled ? "EXPIRED" as const : "PENDING" as const,
+        planCode: verified.planCode, currentPeriodEnd: null,
+        cancelAtPeriodEnd: false, acknowledgementState: verified.acknowledgementState,
+        isTestPurchase: verified.isTestPurchase,
+      };
     }
-
-    if (
-      linkedOwnership?.replaced_by_token &&
-      linkedOwnership.replaced_by_token !== verified.purchaseToken
-    ) {
-      throw new Error("GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED");
-    }
+    if (!verified.startTime || !verified.expiryTime) throw new Error("GOOGLE_PLAY_PURCHASE_DATES_MISSING");
 
     const planResult = await client.query<PlanRow>(
       `
@@ -417,6 +421,7 @@ export const syncGooglePlaySubscription = async ({
         transactionCommitted = true;
 
         return {
+          purchaseResult: purchaseResult(verified, "INACTIVE"),
           subscriptionId: null,
           status,
           planCode: verified.planCode,
@@ -537,6 +542,7 @@ export const syncGooglePlaySubscription = async ({
     }
 
     return {
+      purchaseResult: purchaseResult(verified, status === "ACTIVE" ? "ACTIVE" : "INACTIVE", acknowledged),
       subscriptionId,
       status,
       planCode: verified.planCode,
@@ -555,6 +561,34 @@ export const syncGooglePlaySubscription = async ({
     throw error;
   } finally {
     if (!clientReleased) client.release();
+  }
+};
+
+function purchaseResult(
+  verified: VerifiedGooglePlaySubscription, state: GooglePlayPurchaseResult["state"], acknowledged = false,
+): GooglePlayPurchaseResult {
+  return { state, subscriptionState: verified.subscriptionState,
+    acknowledgementState: acknowledged ? "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED" : verified.acknowledgementState,
+    retryable: state === "PENDING" };
+}
+
+export const syncGooglePlaySubscription = async ({ userId, purchaseToken }: { userId: number; purchaseToken: string }) => {
+  const token = purchaseToken.trim();
+  if (!token) throw new Error("GOOGLE_PLAY_PURCHASE_TOKEN_REQUIRED");
+  // Persist before Google; an HTTP timeout/process crash cannot lose this work.
+  // user_id is populated only after Google + durable ownership checks succeed.
+  const version = await beginGooglePlayRecovery(token);
+  try {
+    const result = await syncGooglePlaySubscriptionCore({ userId, purchaseToken: token });
+    await finishGooglePlayRecovery(token, version,
+      result.purchaseResult.state === "PENDING" ? "PENDING" : "PROCESSED", null,
+      userId, result.purchaseResult.subscriptionState);
+    return result;
+  } catch (error) {
+    const code = googlePlayRecoveryErrorCode(error);
+    await finishGooglePlayRecovery(token, version,
+      googlePlayOwnershipErrors.has(code) ? "DEFERRED" : "RETRY", code);
+    throw error;
   }
 };
 

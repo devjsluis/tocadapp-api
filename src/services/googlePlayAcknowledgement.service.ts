@@ -1,6 +1,8 @@
+import { assertGooglePlayChainOwnership, resolveGooglePlayOwner } from "./googlePlayOwnership.service";
 import {
-  androidPublisher, GOOGLE_PLAY_PACKAGE_NAME, GOOGLE_PLAY_PRODUCT_ID,
+  androidPublisher, GOOGLE_PLAY_PACKAGE_NAME,
 } from "../lib/googlePlay";
+import { getGooglePlayPlan } from "./googlePlayCatalog.service";
 import { getGooglePlaySubscription } from "./googlePlaySubscription.service";
 
 type Purchase = Awaited<ReturnType<typeof getGooglePlaySubscription>>;
@@ -25,7 +27,9 @@ export const acknowledgeSavedGooglePlayPurchase = async (
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [token]);
     }
     const purchase = await getGooglePlaySubscription(purchaseToken);
-    if (JSON.stringify(tokens) !== JSON.stringify(anchors(purchaseToken, purchase))) {
+    if (initial.lineItems![0]!.productId !== purchase.lineItems![0]!.productId ||
+        initial.lineItems![0]!.offerDetails?.basePlanId !== purchase.lineItems![0]!.offerDetails?.basePlanId ||
+        JSON.stringify(tokens) !== JSON.stringify(anchors(purchaseToken, purchase))) {
       throw new Error("GOOGLE_PLAY_PURCHASE_LINK_CHANGED");
     }
     const ownership = await client.query<{
@@ -55,9 +59,15 @@ export const acknowledgeSavedGooglePlayPurchase = async (
     const current = ownership.rows.find(row => row.purchase_token === purchaseToken);
     if ((expectedUserId !== undefined && expectedUserId !== job.user_id) ||
         !current || ownership.rows.length !== tokens.length ||
-        ownership.rows.some(row => row.user_id !== job.user_id) ||
-        ownership.rows.some(row => row.purchase_token !== purchaseToken &&
-          row.replaced_by_token && row.replaced_by_token !== purchaseToken)) {
+        ownership.rows.some(row => row.user_id !== job.user_id)) {
+      return await finish("DEFERRED", "OWNER_CONFLICT_OR_UNKNOWN");
+    }
+    try {
+      assertGooglePlayChainOwnership(purchaseToken, purchase, ownership.rows, job.user_id);
+      if (await resolveGooglePlayOwner(purchase, ownership.rows, client) !== job.user_id) {
+        return await finish("DEFERRED", "OWNER_CONFLICT_OR_UNKNOWN");
+      }
+    } catch {
       return await finish("DEFERRED", "OWNER_CONFLICT_OR_UNKNOWN");
     }
     if (current.replaced_by_token) return await finish("SKIPPED", "REPLACED_PURCHASE");
@@ -81,8 +91,9 @@ export const acknowledgeSavedGooglePlayPurchase = async (
         purchase.acknowledgementState !== "ACKNOWLEDGEMENT_STATE_PENDING") {
       return await finish("DEFERRED", "PURCHASE_NOT_ELIGIBLE");
     }
+    const { productId } = getGooglePlayPlan(purchase.lineItems![0]!.productId, purchase.lineItems![0]!.offerDetails?.basePlanId);
     await androidPublisher.purchases.subscriptions.acknowledge({
-      packageName: GOOGLE_PLAY_PACKAGE_NAME, subscriptionId: GOOGLE_PLAY_PRODUCT_ID,
+      packageName: GOOGLE_PLAY_PACKAGE_NAME, subscriptionId: productId,
       token: purchaseToken, requestBody: {},
     });
     return await finish("COMPLETED", null);

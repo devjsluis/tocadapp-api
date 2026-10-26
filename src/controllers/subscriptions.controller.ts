@@ -1,3 +1,6 @@
+import { getGooglePlayPurchasePolicy } from "../services/googlePlayCatalog.service";
+import { googlePlayRecoveryErrorCode } from "../services/googlePlayOwnership.service";
+import { getGooglePlayBillingIdentity } from "../services/googlePlayIdentity.service";
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth";
 import {
@@ -13,6 +16,32 @@ import {
   reactivateStripeSubscription,
 } from "../services/stripeSubscriptionManagement.service";
 import { syncGooglePlaySubscription } from "../services/googlePlaySubscription.service";
+
+export const getMyGooglePlayBillingIdentity = async (req: AuthRequest, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const identity = await getGooglePlayBillingIdentity(req.user!.id);
+    return res.json({ ...identity, capabilities: {
+      contractVersion: 1,
+      serverIssuedIdentity: true,
+      strictOwnership: true,
+      legacyKnownTokenRecovery: true,
+      legacyUnownedTokenClaim: false,
+      durablePendingRecovery: true,
+      purchaseSpecificResults: true,
+      serverAcknowledgement: true,
+      multiProductRecovery: true,
+      purchaseCatalogVersion: 1,
+    }, purchasePolicy: getGooglePlayPurchasePolicy() });
+  } catch (error) {
+    const missing = error instanceof Error && error.message === "USER_NOT_FOUND";
+    return res.status(missing ? 404 : 503).json({
+      error: "No fue posible obtener la identidad de Billing",
+      code: missing ? "ACCOUNT_UNAVAILABLE" : "GOOGLE_PLAY_BILLING_IDENTITY_UNAVAILABLE",
+      retryable: !missing,
+    });
+  }
+};
 
 export const getMySubscription = async (
   req: AuthRequest,
@@ -144,6 +173,7 @@ export const verifyGooglePlaySubscription = async (
       return res.status(400).json({
         error: "Token de compra inválido",
         code: "INVALID_PURCHASE_TOKEN",
+        retryable: false,
       });
     }
 
@@ -160,8 +190,18 @@ export const verifyGooglePlaySubscription = async (
       hasAccess: subscriptionGrantsAccess(subscription),
       subscription,
       googlePlay: result,
+      purchaseResult: result.purchaseResult,
     });
   } catch (error) {
+    if (error instanceof Error && [
+      "GOOGLE_PLAY_OWNER_UNVERIFIABLE", "GOOGLE_PLAY_BILLING_IDENTITY_UNKNOWN",
+      "GOOGLE_PLAY_LINKED_PURCHASE_OWNER_UNKNOWN",
+    ].includes(error.message)) {
+      return res.status(409).json({
+        error: "No se pudo comprobar la cuenta original de esta compra. Requiere recuperación segura.",
+        code: error.message, retryable: false,
+      });
+    }
     if (
       error instanceof Error &&
       error.message === "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED"
@@ -169,6 +209,7 @@ export const verifyGooglePlaySubscription = async (
       return res.status(409).json({
         error: "Esta compra ya está asociada a otra cuenta",
         code: "GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED",
+        retryable: false,
       });
     }
 
@@ -183,6 +224,7 @@ export const verifyGooglePlaySubscription = async (
       return res.status(400).json({
         error: "La compra no corresponde a una suscripción válida de TocadApp",
         code: "INVALID_GOOGLE_PLAY_PURCHASE",
+        retryable: false,
       });
     }
 
@@ -193,17 +235,19 @@ export const verifyGooglePlaySubscription = async (
       return res.status(404).json({
         error: "El plan de TocadApp no está disponible",
         code: "PLAN_NOT_FOUND",
+        retryable: false,
       });
     }
 
     console.error(
       "Error verificando suscripción de Google Play:",
-      error instanceof Error ? error.message : "UNKNOWN_ERROR",
+      googlePlayRecoveryErrorCode(error),
     );
 
     return res.status(502).json({
       error: "No fue posible verificar la compra con Google Play",
       code: "GOOGLE_PLAY_VERIFICATION_FAILED",
+      retryable: true,
     });
   }
 };

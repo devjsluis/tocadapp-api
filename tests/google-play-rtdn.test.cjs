@@ -11,7 +11,7 @@ test('new unassociated purchase is fetched from Google and durably deferred, nev
   const h = harness(); h.purchase('new');
   h.purchases.get('new').externalAccountIdentifiers = { obfuscatedExternalAccountId: '1', externalAccountId: 'user@example.com' };
   const result = await h.process(encode('new'));
-  assert.equal(result.kind, 'DEFERRED'); assert.equal(result.reason, 'OWNER_UNKNOWN');
+  assert.equal(result.kind, 'DEFERRED'); assert.equal(result.reason, 'GOOGLE_PLAY_BILLING_IDENTITY_UNKNOWN');
   assert.deepEqual(h.getCalls, ['new']); assert.equal(h.rows().length, 0); assert.equal(h.owners().length, 0);
   assert.equal(h.inbox().get('new').google_snapshot.externalAccountIdentifiers.obfuscatedExternalAccountId, '1');
   assert.deepEqual(h.acknowledged, []);
@@ -28,7 +28,7 @@ test('unknown token linked to a registered owner replaces and acknowledges safel
 
 test('out-of-app resubscription uses the verified expired token owner', async () => {
   const h = harness([{ ...old, status: 'EXPIRED' }]); h.purchase('new');
-  h.purchases.get('new').outOfAppPurchaseContext = { expiredPurchaseToken: 'old', expiredExternalAccountIdentifiers: { obfuscatedExternalAccountId: 'opaque' } };
+  h.purchases.get('new').outOfAppPurchaseContext = { expiredPurchaseToken: 'old', expiredExternalAccountIdentifiers: { obfuscatedExternalAccountId: 'a'.repeat(32) } };
   assert.equal((await h.process(encode('new'))).userId, 1);
   assert.equal(h.inbox().get('new').status, 'PROCESSED');
 });
@@ -77,6 +77,7 @@ test('out-of-order chain is reconciled after its missing predecessor is securely
 
 test('an unassociated purchase can reconcile after authenticated verification registers its owner', async () => {
   const h = harness(); h.purchase('new'); await h.process(encode('new'));
+  h.identify('new');
   await h.sync({ userId: 1, purchaseToken: 'new' });
   h.purchases.get('new').acknowledgementState = 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED';
   assert.equal((await h.reconcile()).processed, 1);

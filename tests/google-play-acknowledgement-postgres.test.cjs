@@ -31,7 +31,7 @@ test('isolated PostgreSQL migrations and acknowledgement concurrency', {skip: !c
     INSERT INTO users(id) VALUES(1),(2);
     INSERT INTO plans(code,active,price_amount,currency) VALUES('TOCADAPP_MONTHLY',true,7900,'MXN');
     INSERT INTO subscriptions(user_id,provider,provider_subscription_id,status) VALUES(1,'GOOGLE_PLAY','historical','EXPIRED');`);
-  for (const file of ['035_google_play_purchase_tokens.sql', '036_google_play_rtdn_purchases.sql', '037_google_play_acknowledgements.sql']) {
+  for (const file of ['035_google_play_purchase_tokens.sql', '036_google_play_rtdn_purchases.sql', '037_google_play_acknowledgements.sql', '038_google_play_billing_identities.sql', '039_google_play_purchase_recovery.sql']) {
     await pool.query(fs.readFileSync(path.join(__dirname,'../src/migrations',file),'utf8'));
   }
   await t.test('035/036/037 backfill historical tokens without granting access', async () => {
@@ -42,11 +42,15 @@ test('isolated PostgreSQL migrations and acknowledgement concurrency', {skip: !c
     assert.equal((await pool.query('SELECT count(*) FROM google_play_rtdn_purchases')).rows[0].count,'0');
   });
   async function fresh() {
-    await pool.query('TRUNCATE google_play_acknowledgements, google_play_rtdn_purchases, google_play_purchase_tokens, subscriptions');
-    return harness([], {pool});
+    await pool.query('TRUNCATE google_play_purchase_recovery, google_play_acknowledgements, google_play_rtdn_purchases, google_play_purchase_tokens, subscriptions');
+    const h = harness([], {pool});
+    h.identities.clear();
+    for (const row of (await pool.query('SELECT * FROM google_play_billing_identities')).rows) h.identities.set(row.obfuscated_account_id, row.user_id);
+    h.identify = (token, userId = 1) => { h.purchases.get(token).externalAccountIdentifiers = { obfuscatedExternalAccountId: [...h.identities].find(([,id]) => id === userId)[0] }; };
+    return h;
   }
   async function failed(h) {
-    h.purchase('paid'); h.faults.ack = Error('ACK_TIMEOUT');
+    h.purchase('paid'); h.identify('paid'); h.faults.ack = Error('ACK_TIMEOUT');
     await assert.rejects(h.sync({userId:1,purchaseToken:'paid'}), {message:'ACK_TIMEOUT'});
     delete h.faults.ack;
   }
@@ -161,8 +165,75 @@ test('isolated PostgreSQL migrations and acknowledgement concurrency', {skip: !c
     await Promise.all([writer,discovery]);
     assert.deepEqual(h.acknowledged,['paid']);
   });
+  await t.test('038 backfills permanent identities, creates them for new users, and prevents reuse', async () => {
+    const identities = (await pool.query('SELECT * FROM google_play_billing_identities ORDER BY user_id')).rows;
+    assert.equal(identities.length,2);
+    assert.notEqual(identities[0].obfuscated_account_id,identities[1].obfuscated_account_id);
+    assert.match(identities[0].obfuscated_account_id,/^[0-9a-f]{32}$/);
+    await pool.query('INSERT INTO users(id) VALUES(3)');
+    assert.equal((await pool.query('SELECT count(*) FROM google_play_billing_identities')).rows[0].count,'3');
+    await assert.rejects(pool.query('UPDATE google_play_billing_identities SET user_id=4 WHERE user_id=3'));
+    await assert.rejects(pool.query('DELETE FROM google_play_billing_identities WHERE user_id=3'));
+    await assert.rejects(pool.query('TRUNCATE google_play_billing_identities'));
+    await pool.query('UPDATE users SET deleted_at=NOW() WHERE id=3');
+    assert.equal((await pool.query('SELECT count(*) FROM google_play_billing_identities WHERE user_id=3')).rows[0].count,'1');
+    assert.deepEqual((await pool.query('SELECT * FROM google_play_billing_identities WHERE user_id IN (1,2) ORDER BY user_id')).rows,identities);
+  });
+  await t.test('competing authenticated accounts cannot steal an identified first purchase', async () => {
+    const h=await fresh();h.purchase('race');h.identify('race',1);
+    const results=await Promise.allSettled([h.sync({userId:1,purchaseToken:'race'}),h.sync({userId:2,purchaseToken:'race'})]);
+    assert.equal(results[0].status,'fulfilled');assert.equal(results[1].status,'rejected');
+    assert.equal(results[1].reason.message,'GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED');
+    const owners=(await pool.query('SELECT user_id FROM google_play_purchase_tokens')).rows;
+    assert.deepEqual(owners,[{user_id:1}]);assert.deepEqual(h.acknowledged,['race']);
+    assert.equal((await pool.query('SELECT user_id FROM subscriptions')).rows[0].user_id,1);
+    // A stale/failed request journal never changes canonical ownership.
+    await h.reconcilePurchases();
+    assert.equal((await pool.query('SELECT user_id,status FROM google_play_purchase_recovery')).rows[0].status,'PROCESSED');
+  });
+  await t.test('two same-account verification writers acknowledge one transaction once', async () => {
+    const h=await fresh();h.purchase('race');h.identify('race');
+    await Promise.all([h.sync({userId:1,purchaseToken:'race'}),h.sync({userId:1,purchaseToken:'race'})]);
+    assert.deepEqual(h.acknowledged,['race']);
+    assert.equal((await pool.query('SELECT count(*) FROM subscriptions')).rows[0].count,'1');
+    assert.equal((await pool.query('SELECT count(*) FROM google_play_purchase_recovery')).rows[0].count,'1');
+  });
+  await t.test('unidentified v16 first purchases remain unowned under concurrent claims', async () => {
+    const h=await fresh();h.purchase('legacy');
+    const results=await Promise.allSettled([h.sync({userId:1,purchaseToken:'legacy'}),h.sync({userId:2,purchaseToken:'legacy'})]);
+    assert.ok(results.every(r=>r.status==='rejected' && r.reason.message==='GOOGLE_PLAY_OWNER_UNVERIFIABLE'));
+    assert.equal((await pool.query('SELECT count(*) FROM subscriptions')).rows[0].count,'0');
+    assert.equal((await pool.query('SELECT count(*) FROM google_play_purchase_tokens')).rows[0].count,'0');
+    assert.deepEqual(h.acknowledged,[]);
+  });
+  await t.test('pending without dates survives a new service process and cancellation without entitlements', async () => {
+    const h=await fresh();h.purchase('pending',undefined,'PENDING');h.identify('pending');
+    delete h.purchases.get('pending').startTime;delete h.purchases.get('pending').lineItems[0].expiryTime;
+    assert.equal((await h.sync({userId:1,purchaseToken:'pending'})).purchaseResult.state,'PENDING');
+    assert.equal((await pool.query('SELECT count(*) FROM subscriptions')).rows[0].count,'0');
+    // A fresh harness has no in-memory journal; the same PostgreSQL work is enough.
+    const recovered=harness([], {pool});recovered.purchases.set('pending',structuredClone(h.purchases.get('pending')));
+    recovered.purchases.get('pending').subscriptionState='SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED';
+    assert.equal((await recovered.reconcilePurchases()).processed,1);
+    const row=(await pool.query('SELECT * FROM google_play_purchase_recovery')).rows[0];
+    assert.equal(row.status,'PROCESSED');assert.equal(row.purchase_state,'SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED');
+    assert.equal(row.user_id,1);assert.equal((await pool.query('SELECT count(*) FROM subscriptions')).rows[0].count,'0');
+    assert.deepEqual(recovered.acknowledged,[]);
+  });
+  await t.test('pending replacement cancellation preserves the old paid subscription in PostgreSQL', async () => {
+    const h=await fresh();h.purchase('paid');h.identify('paid');await h.sync({userId:1,purchaseToken:'paid'});
+    const before=(await pool.query('SELECT * FROM subscriptions')).rows;
+    h.purchase('pending','paid','PENDING');h.identify('pending');
+    delete h.purchases.get('pending').startTime;delete h.purchases.get('pending').lineItems[0].expiryTime;
+    await h.sync({userId:1,purchaseToken:'pending'});
+    h.purchases.get('pending').subscriptionState='SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED';
+    await h.reconcilePurchases();
+    assert.deepEqual((await pool.query('SELECT * FROM subscriptions')).rows,before);
+    assert.equal((await pool.query("SELECT replaced_by_token FROM google_play_purchase_tokens WHERE purchase_token='paid'")).rows[0].replaced_by_token,null);
+    assert.deepEqual(h.acknowledged,['paid']);
+  });
   await t.test('subscription rollback cannot leave a queue entry', async () => {
-    const h = await fresh(); h.purchase('paid');
+    const h = await fresh(); h.purchase('paid'); h.identify('paid');
     await pool.query(`CREATE FUNCTION reject_ack_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'queue unavailable'; END $$;
       CREATE TRIGGER reject_ack BEFORE INSERT ON google_play_acknowledgements FOR EACH ROW EXECUTE FUNCTION reject_ack_insert()`);
     await assert.rejects(h.sync({userId:1,purchaseToken:'paid'}));
@@ -171,4 +242,46 @@ test('isolated PostgreSQL migrations and acknowledgement concurrency', {skip: !c
     assert.deepEqual(h.acknowledged,[]);
     await pool.query('DROP TRIGGER reject_ack ON google_play_acknowledgements');
   });
+  await t.test('concurrent resubscription conflict preserves the replacement and durable recovery evidence', async () => {
+    const h=await fresh();h.purchase('old');h.identify('old');
+    await h.sync({userId:1,purchaseToken:'old'});
+    h.purchase('replacement','old');await h.sync({userId:1,purchaseToken:'replacement'});
+    const before=(await pool.query('SELECT * FROM subscriptions ORDER BY id')).rows;
+    const owners=(await pool.query('SELECT * FROM google_play_purchase_tokens ORDER BY purchase_token')).rows;
+    const acknowledged=[...h.acknowledged];
+    h.purchase('resubscription');
+    h.purchases.get('resubscription').outOfAppPurchaseContext={expiredPurchaseToken:'old'};
+    const results=await Promise.allSettled([
+      h.sync({userId:1,purchaseToken:'resubscription'}),
+      h.sync({userId:1,purchaseToken:'resubscription'}),
+      h.sync({userId:2,purchaseToken:'resubscription'}),
+      h.sync({userId:1,purchaseToken:'replacement'}),
+    ]);
+    assert.ok(results.slice(0,3).every(r=>r.status==='rejected' && r.reason.message==='GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED'));
+    assert.equal(results[3].status,'fulfilled');
+    assert.equal((await h.reconcilePurchases()).deferred,1);
+    assert.deepEqual((await pool.query('SELECT * FROM subscriptions ORDER BY id')).rows,before);
+    assert.deepEqual((await pool.query('SELECT * FROM google_play_purchase_tokens ORDER BY purchase_token')).rows,owners);
+    assert.deepEqual(h.acknowledged,acknowledged);
+    const work=(await pool.query("SELECT * FROM google_play_purchase_recovery WHERE purchase_token='resubscription'")).rows[0];
+    assert.equal(work.status,'DEFERRED');assert.equal(work.reason,'GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED');
+    assert.ok(work.attempts>=3);
+    assert.equal((await pool.query("SELECT count(*) FROM google_play_acknowledgements WHERE purchase_token='resubscription'")).rows[0].count,'0');
+  });
+
+  for(const product of ['tocadapp_premium','tocadapp_premium_v2']) for(const base of ['monthly','yearly']) {
+    await t.test('real SQL concurrent verification and recovery '+product+'/'+base,async()=>{
+      const h=await fresh();
+      await pool.query("INSERT INTO plans(code,active,price_amount,currency) SELECT 'TOCADAPP_YEARLY',true,69900,'MXN' WHERE NOT EXISTS(SELECT 1 FROM plans WHERE code='TOCADAPP_YEARLY')");
+      h.purchase('catalog-race');h.identify('catalog-race');
+      Object.assign(h.purchases.get('catalog-race').lineItems[0],{productId:product,offerDetails:{basePlanId:base}});
+      await Promise.all([h.sync({userId:1,purchaseToken:'catalog-race'}),h.sync({userId:1,purchaseToken:'catalog-race'})]);
+      assert.deepEqual(h.acknowledged,['catalog-race']);assert.deepEqual(h.acknowledgementProducts,[product]);
+      assert.equal((await pool.query('SELECT count(*) FROM subscriptions')).rows[0].count,'1');
+      assert.equal((await pool.query('SELECT status FROM google_play_acknowledgements')).rows[0].status,'COMPLETED');
+      await h.reconcilePurchases();
+      await assert.rejects(h.sync({userId:2,purchaseToken:'catalog-race'}),{message:'GOOGLE_PLAY_PURCHASE_ALREADY_CLAIMED'});
+    });
+  }
+
 });
