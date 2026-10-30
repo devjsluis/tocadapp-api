@@ -16,6 +16,7 @@ import financialMovementsRoutes from "./routes/financialMovements.routes";
 import stripeWebhookRoutes from "./routes/stripeWebhook.routes";
 import googlePlayWebhookRoutes from "./routes/googlePlayWebhook.routes";
 
+import { appleSubscriptionsRouter, appleNotificationsRouter } from "./routes/appleSubscriptions.routes";
 const app = express();
 
 app.disable("x-powered-by");
@@ -58,6 +59,8 @@ app.use(
 );
 
 app.use(express.json());
+app.use("/subscriptions/apple", appleSubscriptionsRouter);
+app.use("/webhooks/apple", appleNotificationsRouter);
 
 app.use("/webhooks/google-play", googlePlayWebhookRoutes);
 
