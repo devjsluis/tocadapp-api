@@ -21,8 +21,17 @@ export function appleEntitlement(tx: JWSTransactionDecodedPayload, renewal: JWSR
   return { status: active ? "ACTIVE" : "EXPIRED", end: new Date(end), cancelAtPeriodEnd: renewal.autoRenewStatus !== 1 };
 }
 
+// Environment is chosen by appleEnvironment(userId), never supplied by the client.
+export function appleNewPurchasesEnabled(environment: Environment, hasAccess: boolean,
+  env: Record<string, string | undefined> = process.env) {
+  if (hasAccess) return false;
+  return env.APPLE_NEW_PURCHASES_ENABLED === "true" ||
+    (environment === "Sandbox" && env.APPLE_SANDBOX_NEW_PURCHASES_ENABLED === "true");
+}
+
 export async function getAppleBillingIdentity(userId: number) {
-  appleStore(appleEnvironment(userId)); // Fail closed until keys and trusted Apple roots are configured.
+  const environment = appleEnvironment(userId);
+  appleStore(environment); // Fail closed until keys and trusted Apple roots are configured.
   await pool.query(`INSERT INTO apple_billing_identities (user_id, app_account_token)
     SELECT id, $2::uuid FROM users WHERE id = $1 AND deleted_at IS NULL
     ON CONFLICT (user_id) DO NOTHING`, [userId, randomUUID()]);
@@ -31,8 +40,8 @@ export async function getAppleBillingIdentity(userId: number) {
   if (!identity.rows[0]) throw new Error("APPLE_ACCOUNT_UNAVAILABLE");
   const current = await getCurrentSubscriptionByUserId(userId);
   return { contractVersion: 1, appAccountToken: identity.rows[0].app_account_token,
-    environment: appleEnvironment(userId), products: APPLE_PRODUCTS,
-    newPurchasesEnabled: process.env.APPLE_NEW_PURCHASES_ENABLED === "true" && !subscriptionGrantsAccess(current) };
+    environment, products: APPLE_PRODUCTS,
+    newPurchasesEnabled: appleNewPurchasesEnabled(environment, subscriptionGrantsAccess(current)) };
 }
 
 export async function syncAppleSubscription(transactionId: string, expectedUserId?: number, notificationEnvironment?: Environment) {

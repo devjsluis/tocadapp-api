@@ -179,3 +179,41 @@ test('production routes only explicitly authorized review users into sandbox', (
     if (oldReviewers === undefined) delete process.env.APPLE_SANDBOX_USER_IDS; else process.env.APPLE_SANDBOX_USER_IDS = oldReviewers;
   }
 });
+
+
+test('sandbox-only purchase flag never enables Production sales and active access stays blocked', () => {
+  const { appleNewPurchasesEnabled: enabled } = setup().service;
+  assert.equal(enabled('Sandbox',false,{}),false);
+  assert.equal(enabled('Production',false,{APPLE_SANDBOX_NEW_PURCHASES_ENABLED:'true'}),false);
+  assert.equal(enabled('Sandbox',false,{APPLE_SANDBOX_NEW_PURCHASES_ENABLED:'true'}),true);
+  assert.equal(enabled('Production',false,{APPLE_NEW_PURCHASES_ENABLED:'true'}),true);
+  for(const environment of ['Sandbox','Production']) {
+    assert.equal(enabled(environment,true,{APPLE_NEW_PURCHASES_ENABLED:'true',APPLE_SANDBOX_NEW_PURCHASES_ENABLED:'true'}),false);
+  }
+  for(const flag of ['TRUE','1','yes','false']) {
+    assert.equal(enabled('Sandbox',false,{APPLE_SANDBOX_NEW_PURCHASES_ENABLED:flag}),false);
+  }
+});
+
+test('identity opens sandbox purchases only for server-allowlisted reviewers, preserving Production policy', async () => {
+  const keys=['APPLE_ENVIRONMENT','APPLE_SANDBOX_USER_IDS','APPLE_NEW_PURCHASES_ENABLED','APPLE_SANDBOX_NEW_PURCHASES_ENABLED'];
+  const old=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  try {
+    Object.assign(process.env,{APPLE_ENVIRONMENT:'Production',APPLE_SANDBOX_USER_IDS:'7',
+      APPLE_NEW_PURCHASES_ENABLED:'false',APPLE_SANDBOX_NEW_PURCHASES_ENABLED:'true'});
+    const apple=load('lib/apple.ts',{'node:fs':require('node:fs'),
+      '@apple/app-store-server-library':{Environment:{SANDBOX:'Sandbox',PRODUCTION:'Production'}}});
+    apple.appleStore=()=>({});
+    const service=load('services/appleSubscription.service.ts',{
+      'node:crypto':require('node:crypto'),'../lib/apple':apple,
+      '../lib/db':{pool:{query:async sql=>({rows:sql.includes('SELECT app_account_token')?[{app_account_token:token}]:[]})}},
+      './subscriptions.service':{getCurrentSubscriptionByUserId:async()=>null,subscriptionGrantsAccess:()=>false},
+    });
+    const reviewer=await service.getAppleBillingIdentity(7);
+    assert.equal(reviewer.environment,'Sandbox');assert.equal(reviewer.newPurchasesEnabled,true);
+    const ordinary=await service.getAppleBillingIdentity(8);
+    assert.equal(ordinary.environment,'Production');assert.equal(ordinary.newPurchasesEnabled,false);
+  } finally {
+    for(const key of keys) {if(old[key]===undefined)delete process.env[key];else process.env[key]=old[key];}
+  }
+});
