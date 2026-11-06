@@ -109,6 +109,27 @@ export const createBand = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// Rename only; ownership is checked atomically and archived bands are supported.
+export const renameBand = async (req: AuthRequest, res: Response) => {
+  const id = Number(req.params.id);
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!Number.isSafeInteger(id) || id <= 0 || !name || name.length > 255) {
+    return res.status(400).json({ error: "Ingresa un nombre de banda de 1 a 255 caracteres y un identificador válido" });
+  }
+  try {
+    const result = await pool.query(
+      "UPDATE bands SET name = $1 WHERE id = $2 AND owner_id = $3 RETURNING *",
+      [name, id, req.user!.id],
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Banda no encontrada o no autorizada" });
+    }
+    return res.json({ ok: true, data: result.rows[0] });
+  } catch {
+    return res.status(500).json({ error: "No fue posible actualizar el nombre de la banda" });
+  }
+};
+
 export const joinBand = async (req: AuthRequest, res: Response) => {
   const { invite_code } = req.body;
   const userId = req.user!.id;

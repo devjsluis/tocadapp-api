@@ -3,6 +3,7 @@ import { authMiddleware } from "../middleware/auth";
 import {
   getBands,
   createBand,
+  renameBand,
   joinBand,
   getMyBandJoinRequests,
   getBandJoinRequests,
@@ -24,6 +25,7 @@ router.use(authMiddleware);
 
 router.get("/", getBands);
 router.post("/", createBand);
+router.patch("/:id", renameBand);
 router.post("/join", joinBand);
 router.get("/my-join-requests", getMyBandJoinRequests);
 
