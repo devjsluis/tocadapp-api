@@ -25,11 +25,11 @@ Apple y Google Play no se estiman a partir de precios o compras de usuarios: se 
 
 Se incluyen por separado los pagos de suscripción registrados manualmente. Se pueden descargar CSV con importes en unidades monetarias y los documentos originales PDF/XML/CSV. El resumen se puede imprimir o guardar en PDF desde el navegador. No se emiten CFDI ni se presentan declaraciones al SAT desde el módulo. Un periodo sin movimientos no determina por sí solo una declaración en ceros.
 
-## Activación pendiente
+## Activación y operación
 
-La migración `src/migrations/042_accounting_portal.sql` está preparada; no se ha aplicado a producción. No se crearon credenciales reales. No se modificaron archivos `.env` ni las credenciales existentes.
+La migración `src/migrations/042_accounting_portal.sql` se aplicó en producción con autorización el 2026-11-12. No se crearon credenciales permanentes para el contador. El acceso temporal de verificación fue revocado y eliminado. No se modificaron archivos `.env` ni las credenciales existentes.
 
-Antes de activar:
+Procedimiento de activación y uso (los pasos 1 y 2 ya están completados):
 
 1. Con autorización, respaldar PostgreSQL y aplicar únicamente la migración 042. Es aditiva: crea cinco tablas e índices sin modificar pagos o suscripciones existentes.
 2. Construir y desplegar API y web; revisar que el proxy permita solicitudes de hasta 10 MB para documentos. No imprimir configuraciones con secretos al revisar el proxy.
@@ -37,14 +37,26 @@ Antes de activar:
 4. Cargar los CFDI, estados bancarios y reportes de las tiendas necesarios para los meses que revisará el contador.
 5. Comprobar en producción login, revocación, selección mensual y descarga de un documento de prueba controlado. Conciliar los primeros importes con los reportes oficiales.
 
-Los repositorios tienen despliegue automático al hacer push a `main`; coordinar la migración antes del despliegue. No se ha hecho commit, push ni despliegue de este módulo.
+Los repositorios tienen despliegue automático al hacer push a `main`; coordinar la migración antes del despliegue. Los commits de API `cd470e6` y web `e539c17` se subieron y desplegaron con autorización, usando `[skip ci]` para aplicar primero la migración y controlar el orden de activación.
 
 ## Verificación realizada
 
 - Tests de API: aislamiento de cuentas y cookies, CSRF de login, revocación/rotación y carrera de contraseña, permisos, expiración, documentos, periodos inválidos, caída de Stripe, monedas, transferencias sin doble conteo, CSV y evidencia de liquidaciones.
 - Tests de web: cliente separado, importes exactos, login del contador, estados pendientes frente a cero, errores de Stripe y respuestas antiguas al cambiar de mes.
 - PostgreSQL en memoria (PGlite, instalación temporal externa al proyecto): migración, zonas horarias históricas, SQL real de credenciales y sesiones, `BYTEA`, restricciones de evidencia, liquidaciones, CSV y auditoría. No se usó una base de datos de producción.
-- Navegador Edge con el build de producción y API simulada: nueve comprobaciones de login/logout, CSV, acción de impresión PDF, vista móvil sin desbordamiento, creación de credenciales, subida, conciliación y descarga idéntica al original, sin errores JavaScript.
+- Navegador Edge con el build de producción y API simulada: nueve comprobaciones de login/logout, CSV, generación de PDF con estilos de impresión, vista móvil sin desbordamiento, creación de credenciales, subida, conciliación y descarga idéntica al original, sin errores JavaScript.
 - Builds de producción de API y Next.js, TypeScript y ESLint de los archivos web modificados.
 
-Las comprobaciones de base de datos en memoria y navegador validan el flujo con datos controlados. Falta validar las cifras reales y los documentos oficiales tras activar el módulo.
+Las comprobaciones de base de datos en memoria y navegador validan el flujo con datos controlados. La consulta de Stripe real y el CSV también se verificaron después del despliegue. Falta que el propietario cargue sus documentos oficiales y el contador concilie las cifras con los estados bancarios.
+
+## Registro de producción: 2026-11-12
+
+- Respaldo previo: /home/ubuntu/tocadapp-backups/before-accounting-042-20261112T221026Z.dump; se comprobó lectura del catálogo con pg_restore, sin ensayar una restauración.
+- Migración 042 aplicada: cinco tablas verificadas en PostgreSQL 15. Pagos y suscripciones existentes no se alteraron.
+- Imágenes anteriores conservadas como before-accounting-042. Dockerfiles del servidor preservados.
+- Nginx ajustado a 10 MB, con copia privada de la configuración, nginx -t exitoso y recarga sin reinicio. Una solicitud controlada de 2 MB pasó el proxy y fue rechazada por autenticación sin guardar datos.
+- Builds del servidor y sus 20 pruebas contables de API y 7 de web pasaron. Suites locales completas: 198 pruebas de API pasaron, una omitida; 22 de web pasaron, ninguna falló. TypeScript y ESLint pasaron.
+- Verificación real por HTTPS con acceso temporal: login en navegador, cookie independiente Secure/HttpOnly/SameSite=Strict, reporte mensual con Stripe real disponible, CSV privado, rechazo de acceso a administración y músicos y revocación inmediata. El acceso temporal y sus sesiones se eliminaron; se conservaron sus eventos de auditoría.
+- Portal https://tocadapp.com/contabilidad/login disponible con HTTP 200; API saludable; reportes anónimos devuelven 401. No se generaron cobros ni registros ficticios de ingresos en producción.
+
+Para entregar acceso al contador, entrar con la cuenta administradora en https://tocadapp.com/dashboard/admin/accounting y crear sus credenciales. La contraseña se muestra una sola vez y debe compartirse de forma privada.
