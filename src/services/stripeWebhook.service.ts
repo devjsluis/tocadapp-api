@@ -56,7 +56,7 @@ const getSubscriptionPeriod = (
 ) => {
   const item = subscription.items.data[0];
 
-  if (!item) {
+  if (!item || subscription.items.data.length !== 1) {
     throw new Error("STRIPE_SUBSCRIPTION_WITHOUT_ITEMS");
   }
 
@@ -104,29 +104,6 @@ const getUserIdFromSubscription = (
   return userId;
 };
 
-const closeExistingOpenSubscription = async (
-  client: PoolClient,
-  userId: number,
-  exceptProviderSubscriptionId: string,
-) => {
-  await client.query(
-    `
-      UPDATE subscriptions
-      SET
-        status = 'EXPIRED',
-        ended_at = COALESCE(ended_at, NOW()),
-        cancel_at_period_end = FALSE
-      WHERE user_id = $1
-        AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
-        AND (
-          provider <> 'STRIPE'
-          OR provider_subscription_id IS DISTINCT FROM $2
-        )
-    `,
-    [userId, exceptProviderSubscriptionId],
-  );
-};
-
 const upsertStripeSubscription = async (
   client: PoolClient,
   subscription: Stripe.Subscription,
@@ -136,6 +113,13 @@ const upsertStripeSubscription = async (
 
   if (!userId || !planCode) {
     throw new Error("STRIPE_SUBSCRIPTION_METADATA_MISSING");
+  }
+
+  await client.query("SELECT pg_advisory_xact_lock(73421, $1)", [userId]);
+  // Read under the same per-account lock as Checkout. Snapshot events may be stale.
+  subscription = await stripe.subscriptions.retrieve(subscription.id);
+  if (getUserIdFromSubscription(subscription) !== userId || getPlanCodeFromSubscription(subscription) !== planCode) {
+    throw new Error("STRIPE_SUBSCRIPTION_METADATA_CHANGED");
   }
 
   // Un webhook tardío nunca debe volver a crear o actualizar
@@ -164,7 +148,6 @@ const upsertStripeSubscription = async (
       SELECT id, price_amount, currency
       FROM plans
       WHERE code = $1
-        AND active = TRUE
       LIMIT 1
     `,
     [planCode],
@@ -179,11 +162,25 @@ const upsertStripeSubscription = async (
   const status = mapStripeStatus(subscription.status);
   const customerId = getStripeId(subscription.customer);
 
-  await closeExistingOpenSubscription(
-    client,
-    userId,
-    subscription.id,
-  );
+  if (["PENDING", "ACTIVE", "PAST_DUE"].includes(status)) {
+    const competing = await client.query<{ id: number; provider: string }>(
+      `SELECT id, provider FROM subscriptions
+       WHERE user_id = $1 AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')
+         AND (provider <> 'STRIPE' OR provider_subscription_id IS DISTINCT FROM $2)
+       FOR UPDATE`, [userId, subscription.id]);
+    if (competing.rows.some(row => row.provider !== "TRIAL")) {
+      // Do not hide another paid subscription; operators must resolve legacy duplicates.
+      throw new Error("STRIPE_SUBSCRIPTION_CONFLICT");
+    }
+    if (competing.rowCount) {
+      if (status !== "ACTIVE") return null;
+      await client.query(`UPDATE subscriptions SET status = 'EXPIRED',
+        ended_at = COALESCE(ended_at, NOW()), cancel_at_period_end = FALSE
+        WHERE user_id = $1 AND provider = 'TRIAL' AND status IN ('PENDING', 'ACTIVE', 'PAST_DUE')`, [userId]);
+    }
+  }
+  const price = subscription.items.data[0].price;
+  if (price.unit_amount === null) throw new Error("STRIPE_PRICE_AMOUNT_MISSING");
 
   const existingResult = await client.query<{ id: number }>(
     `
@@ -221,8 +218,8 @@ const upsertStripeSubscription = async (
         plan.id,
         status,
         customerId,
-        plan.price_amount,
-        plan.currency,
+        price.unit_amount,
+        price.currency.toUpperCase(),
         unixToDate(subscription.start_date),
         period.start,
         period.end,
@@ -274,8 +271,8 @@ const upsertStripeSubscription = async (
       status,
       customerId,
       subscription.id,
-      plan.price_amount,
-      plan.currency,
+      price.unit_amount,
+      price.currency.toUpperCase(),
       unixToDate(subscription.start_date),
       period.start,
       period.end,
@@ -340,6 +337,12 @@ const handleInvoicePaymentSucceeded = async (
       ? getStripeId(invoicePayment.payment.payment_intent)
       : invoicePayment?.id ?? invoice.id;
 
+  const recurringLine = invoice.lines.data.find(line =>
+    line.parent?.type === "subscription_item_details" &&
+    line.parent.subscription_item_details?.subscription === stripeSubscriptionId &&
+    !line.parent.subscription_item_details.proration);
+  const paidPeriod = recurringLine?.period ?? { start: invoice.period_start, end: invoice.period_end };
+
   const paidAt =
     invoicePayment?.status_transitions.paid_at
       ? unixToDate(invoicePayment.status_transitions.paid_at)
@@ -373,8 +376,8 @@ const handleInvoicePaymentSucceeded = async (
       invoice.amount_paid,
       invoice.currency.toUpperCase(),
       paidAt,
-      synced.period.start,
-      synced.period.end,
+      unixToDate(paidPeriod.start),
+      unixToDate(paidPeriod.end),
       invoice.id,
       `Stripe invoice ${invoice.id}`,
       providerPaymentId,
@@ -388,41 +391,6 @@ const handleSubscriptionChanged = async (
   subscription: Stripe.Subscription,
 ) => {
   await upsertStripeSubscription(client, subscription);
-};
-
-const handleSubscriptionDeleted = async (
-  client: PoolClient,
-  subscription: Stripe.Subscription,
-) => {
-  await client.query(
-    `
-      UPDATE subscriptions
-      SET
-        status = 'CANCELED',
-        cancel_at_period_end = FALSE,
-        canceled_at = COALESCE(
-          $1,
-          canceled_at,
-          NOW()
-        ),
-        ended_at = COALESCE(
-          $2,
-          ended_at,
-          NOW()
-        )
-      WHERE provider = 'STRIPE'
-        AND provider_subscription_id = $3
-    `,
-    [
-      subscription.canceled_at
-        ? unixToDate(subscription.canceled_at)
-        : null,
-      subscription.ended_at
-        ? unixToDate(subscription.ended_at)
-        : null,
-      subscription.id,
-    ],
-  );
 };
 
 const handleInvoicePaymentFailed = async (
@@ -488,18 +456,13 @@ export const processStripeEvent = async (
 
       case "customer.subscription.created":
       case "customer.subscription.updated":
+      case "customer.subscription.deleted":
         await handleSubscriptionChanged(
           client,
           event.data.object,
         );
         break;
 
-      case "customer.subscription.deleted":
-        await handleSubscriptionDeleted(
-          client,
-          event.data.object,
-        );
-        break;
 
       default:
         break;

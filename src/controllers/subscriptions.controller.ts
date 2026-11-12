@@ -69,7 +69,7 @@ export const createSubscriptionCheckout = async (
   res: Response,
 ) => {
   try {
-    const { planCode } = req.body;
+    const { planCode } = req.body ?? {};
 
     if (!isCheckoutPlanCode(planCode)) {
       return res.status(400).json({
@@ -86,6 +86,12 @@ export const createSubscriptionCheckout = async (
 
     return res.status(201).json(result);
   } catch (error) {
+    if (error instanceof Error && ["SUBSCRIPTION_ALREADY_EXISTS", "CHECKOUT_RECONCILIATION_REQUIRED"].includes(error.message)) {
+      return res.status(409).json({
+        error: "Ya existe una suscripción o un pago pendiente de confirmación. Comprueba tu suscripción antes de volver a pagar.",
+        code: error.message,
+      });
+    }
     console.error("Error al crear Checkout de Stripe:", error);
 
     if (error instanceof Error && error.message === "PLAN_NOT_FOUND") {
