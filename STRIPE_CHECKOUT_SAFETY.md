@@ -2,7 +2,7 @@
 
 ## Preparación del despliegue
 
-Aplicar src/migrations/041_stripe_checkout_attempts.sql con autorización antes de desplegar la API. El código falla sin crear cargos si falta la tabla. La migración no modifica suscripciones ni pagos existentes. No se ha ejecutado como parte del cambio.
+Aplicar src/migrations/041_stripe_checkout_attempts.sql con autorización antes de desplegar la API. El código falla sin crear cargos si falta la tabla. La migración no modifica suscripciones ni pagos existentes. Aplicada en producción el 2026-11-12 con autorización; ver registro de verificación abajo.
 
 Los pushes a main despliegan automáticamente API y web mediante GitHub Actions. Estos commits usan [skip ci] para publicar el código sin activar esos despliegues. Aplicar la migración y autorizar el despliegue antes de activar los cambios. Desplegar API antes de web.
 
@@ -23,3 +23,16 @@ Los eventos de suscripción se actualizan consultando Stripe bajo el bloqueo, in
 7. Reiniciar API entre creación remota y persistencia de session_id: recuperar con la misma clave.
 
 Las pruebas automatizadas usan sustitutos de Stripe/PostgreSQL y no realizan cobros, migraciones ni cambios de datos reales.
+
+## Despliegue y verificación: 2026-11-12
+
+- Migración 041 aplicada y sus cinco columnas comprobadas en la base de producción.
+- Respaldo previo: /home/ubuntu/tocadapp-backups/before-stripe-041-20261112T205035Z.dump. Se verificó que pg_restore puede leer su catálogo; no se ensayó una restauración.
+- API 135990d y web e4306a6 construidas y desplegadas por SSH, preservando los Dockerfiles existentes. Imágenes anteriores conservadas con etiqueta before-stripe-041.
+- En las imágenes del servidor pasaron las 31 pruebas de Stripe de API y las 5 de web. El build de API y el build de producción de Next.js terminaron correctamente.
+- https://tocadapp.com/api/health devuelve 200 con ok=true; login devuelve 200; Checkout sin autenticación devuelve 401; webhook sin firma devuelve 400. Se comprobó que el bundle público contiene las protecciones nuevas.
+- Stripe real: webhook habilitado con los eventos de suscripción y factura requeridos; catálogo mensual 7900 y anual 69900 centavos MXN, coincidente con la web.
+- Stripe de prueba: 11 comprobaciones programáticas pasaron contra PostgreSQL real en una base temporal separada. Incluyeron Checkout concurrente, cambio de plan y expiración del enlace anterior, evento firmado real de prueba, pago mensual, pago anual, deduplicación, bloqueo de otra compra, renovación pagada mediante reloj de pruebas, renovación rechazada sin acceso ni pago registrado, plan desactivado, cancelación/reactivación y eventos antiguos tras cancelar.
+- Durante la validación, el webhook de prueba hacia producción permaneció desactivado. Los eventos de prueba se procesaron solo contra la base aislada. Los clientes, suscripciones y relojes de prueba creados se limpiaron; los enlaces abiertos se expiraron y la base temporal se eliminó. No se generaron cobros reales.
+
+Límite de esta verificación: los pagos de suscripción de prueba se confirmaron mediante la API de Stripe y sus eventos reales; no se automatizó la introducción de tarjeta ni el recorrido visual completo en la página hospedada de Checkout. Falta esa comprobación manual en navegador. No se cambió la configuración del webhook de prueba para habilitar envíos a producción.
