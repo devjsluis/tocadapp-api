@@ -44,7 +44,11 @@ function harness(options = {}) {
     }
     if (sql.includes('FROM accounting_accounts ORDER')) return result(state.accounts.map(a => ({ id: a.id, username: a.username, displayName: a.display_name, active: a.active })));
     if (sql.includes('FROM users')) return result([{ id: 7, email: 'admin@example.invalid', role: options.musician ? 'musician' : 'admin', session_version: 1 }]);
-    if (sql.includes("AT TIME ZONE")) return result([{ start: new Date('2026-11-01T06:00:00Z'), end: new Date('2026-12-01T06:00:00Z') }]);
+    if (sql.includes("AT TIME ZONE")) {
+      const start = new Date(args[0] + 'T06:00:00Z');
+      const end = sql.includes("interval '1 day'") ? new Date(Date.parse(args[1] + 'T06:00:00Z') + 86400000) : new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth()+1,1,6));
+      return result([{ start, end }]);
+    }
     if (sql.includes('FROM subscription_payments')) return result(state.payments);
     if (sql.includes('FROM accounting_settlements')) return result(state.settlements);
     if (sql.startsWith('DELETE FROM accounting_documents') && options.restrictCode) throw Object.assign(Error('Restricted'), { code: options.restrictCode });
@@ -52,6 +56,7 @@ function harness(options = {}) {
       return result(state.documents.filter(d => d.id === args[0]).map(d => ({ ...d, month: '2026-11' })));
     }
     if (sql.includes('FROM accounting_documents WHERE id=')) return result(state.documents.filter(d => d.id === args[0] && d.month === args[1] && d.kind === args[2]));
+    if (sql.includes('FROM accounting_documents') && sql.includes('WHERE month >=')) return result(state.documents.map(({ content, ...d }) => d));
     if (sql.includes('FROM accounting_documents WHERE month=')) return result(state.documents.map(({ content, ...d }) => d));
     if (sql.startsWith('INSERT INTO accounting_documents')) {
       const doc = { id: state.documents.length + 1, month: args[0], kind: args[1], filename: args[2], content_type: args[3], content: args[4], sha256: args[5] };
@@ -272,4 +277,62 @@ test('accounting report never queries musicians personal gigs, bands, or financi
   const report = await h.load('services/accountingReport.service.ts').accountingReport('2026-11');
   assert.equal(report.manual.length, 1); assert.doesNotMatch(JSON.stringify(report), /must-not-be-returned/);
   assert.equal(h.state.queries.some(q => /FROM (gigs|bands|financial_movements|musicians|expenses)\b/.test(q.sql)), false);
+});
+
+
+test('custom date ranges validate real calendar days, leap years, ordering and mutually exclusive month mode', () => {
+  const h = harness(); const { normalizeAccountingFilters, accountingPeriodMonths, fullAccountingMonths } = h.load('services/accountingFilters.ts');
+  const filters = normalizeAccountingFilters({ from: '2024-02-29', to: '2024-03-31', provider: 'STRIPE', currency: 'USD', status: 'paid' });
+  assert.equal(filters.month, null); assert.equal(filters.to, '2024-03-31');
+  assert.deepEqual(Array.from(accountingPeriodMonths(filters)), ['2024-02','2024-03']);
+  assert.deepEqual(Array.from(fullAccountingMonths(filters)), ['2024-03']);
+  for (const query of [{ from:'2026-02-29',to:'2026-03-01' },{ from:'2026-11-31',to:'2026-12-01' },{ from:'2026-11-12',to:'2026-11-11' },{ from:'2026-11-12' },{month:'2026-11',from:'2026-11-01',to:'2026-11-30'},
+    {month:'2026-11',provider:'FORGED'},{month:'2026-11',currency:['MXN']},{month:'2026-11',status:'forged'}]) assert.throws(()=>normalizeAccountingFilters(query),/INVALID_/);
+});
+test('range includes the complete final day in Mexico and export records all selected filters', async () => {
+  const h = harness(); const service = h.load('services/accountingReport.service.ts');
+  const report = await service.accountingReport({from:'2026-11-10',to:'2026-11-11',provider:'STRIPE',currency:'MXN',status:'paid'});
+  assert.equal(report.start,'2026-11-10T06:00:00.000Z');assert.equal(report.endExclusive,'2026-11-12T06:00:00.000Z');
+  const range=h.state.stripeCalls.find(c=>c.kind==='balance').params.created;
+  assert.equal(range.lt,Date.parse('2026-11-12T06:00:00Z')/1000);
+  assert.match(service.reportCsv(report),/"2026-11-10","2026-11-11","STRIPE","MXN","paid"/);
+});
+test('Stripe status and currency filters recalculate totals only from matching records', () => {
+  const h=harness();const service=h.load('services/accountingReport.service.ts');const {normalizeAccountingFilters}=h.load('services/accountingFilters.ts');
+  const source={status:'available',transactions:[
+    {id:'mxn-ready',type:'charge',category:'charge',currency:'MXN',status:'available',amountMinor:7900,feeMinor:400,netMinor:7500},
+    {id:'mxn-pending',type:'charge',category:'charge',currency:'MXN',status:'pending',amountMinor:2000,feeMinor:100,netMinor:1900},
+    {id:'usd-ready',type:'charge',category:'charge',currency:'USD',status:'available',amountMinor:500,feeMinor:50,netMinor:450}],
+    payouts:[{id:'paid',currency:'MXN',status:'paid',amountMinor:7500},{id:'failed',currency:'MXN',status:'failed',amountMinor:2000}],invoices:[{id:'invoice',currency:'MXN'}]};
+  const available=service.filterStripeAccounting(source,normalizeAccountingFilters({month:'2026-11',currency:'MXN',status:'available'}));
+  assert.equal(available.transactions.length,1);assert.equal(available.transactions[0].id,'mxn-ready');assert.equal(available.totals[0].netMinor,7500);assert.equal(available.payouts.length,0);assert.equal(available.invoices.length,0);
+  const paid=service.filterStripeAccounting(source,normalizeAccountingFilters({month:'2026-11',currency:'MXN',status:'paid'}));
+  assert.equal(paid.transactions.length,0);assert.equal(paid.payouts.length,1);assert.equal(paid.invoices.length,1);assert.equal(paid.totals[0].depositsMinor,7500);
+});
+test('a native-provider filter never queries Stripe and retains only its documents plus shared evidence', async () => {
+  const h=harness({stripeUnavailable:true});h.state.documents.push({id:1,kind:'APPLE'},{id:2,kind:'GOOGLE_PLAY'},{id:3,kind:'CFDI'},{id:4,kind:'STRIPE_FEES'});
+  const report=await h.load('services/accountingReport.service.ts').accountingReport({month:'2026-11',provider:'APPLE',currency:'MXN',status:'all'});
+  assert.equal(report.stripe.status,'not_selected');assert.equal(h.state.stripeCalls.length,0);assert.deepEqual(Array.from(report.documents,d=>d.id),[1,3]);assert.deepEqual(Array.from(report.pendingProviders),['APPLE']);
+});
+test('partial monthly settlements are never prorated or included as daily income', async () => {
+  const h=harness();h.state.settlements.push({id:1,provider:'APPLE',month:'2026-11',currency:'MXN',grossMinor:'10000',feesMinor:'1500',refundsMinor:'0',withheldMinor:'0',netMinor:'8500',depositsMinor:'8500'});
+  const service=h.load('services/accountingReport.service.ts');
+  const partial=await service.accountingReport({from:'2026-11-10',to:'2026-11-20',provider:'APPLE'});
+  assert.equal(partial.settlements.length,0);assert.deepEqual(Array.from(partial.partialMonths),['2026-11']);assert.match(service.reportCsv(partial),/MES_PARCIAL/);
+  const full=await service.accountingReport({from:'2026-11-01',to:'2026-11-30',provider:'APPLE'});
+  assert.equal(full.settlements.length,1);assert.equal(full.settlements[0].grossMinor,10000);assert.equal(full.partialMonths.length,0);
+});
+test('quarterly native reports retain confirmed full months and identify each missing month', async () => {
+  const h=harness();h.state.settlements.push({id:1,provider:'APPLE',month:'2026-10',currency:'MXN',grossMinor:10000,feesMinor:1500,refundsMinor:0,withheldMinor:0,netMinor:8500,depositsMinor:8500});
+  const report=await h.load('services/accountingReport.service.ts').accountingReport({from:'2026-10-01',to:'2026-12-31',provider:'APPLE',currency:'MXN',status:'confirmed'});
+  assert.equal(report.settlements.length,1);assert.deepEqual(Array.from(report.pendingProviderMonths,row=>row.month),['2026-11','2026-12']);
+});
+test('manual status selection excludes other providers and uses the same filters for report and export endpoints', async () => {
+  const h=harness();h.state.payments.push({id:1,provider:'MANUAL',amount:7900,currency:'MXN',paid_at:new Date('2026-11-10T12:00:00Z'),reference:'matching-manual'},
+    {id:2,provider:'MANUAL',amount:100,currency:'USD',paid_at:new Date('2026-11-10T12:00:00Z'),reference:'excluded-currency'});
+  await withServer(h,async({request,login})=>{const cookie=await login();const query='from=2026-11-10&to=2026-11-11&provider=MANUAL&currency=MXN&status=registered';
+    const report=await request('/accounting/report?'+query,{headers:{Cookie:cookie}});assert.equal(report.status,200);assert.equal(report.body.manual.length,1);
+    const csv=await request('/accounting/export?'+query,{headers:{Cookie:cookie}});assert.equal(csv.status,200);assert.match(csv.body,/matching-manual/);assert.doesNotMatch(csv.body,/excluded-currency/);
+    assert.match(JSON.stringify(h.state.audits),/registered/);assert.equal(h.state.stripeCalls.length,0);
+  });
 });

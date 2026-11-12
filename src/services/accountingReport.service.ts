@@ -1,3 +1,4 @@
+import { normalizeAccountingFilters, accountingPeriodMonths, fullAccountingMonths, accountingDocumentMatches, type AccountingFilters } from "./accountingFilters";
 import { pool } from "../lib/db";
 import { stripe } from "../lib/stripe";
 import type Stripe from "stripe";
@@ -46,7 +47,7 @@ export async function monthBounds(month: string) {
 export async function accountingDocuments(month: string) {
   if (!validAccountingMonth(month)) throw Error("INVALID_MONTH");
   return (await pool.query(`SELECT id,kind,filename,content_type AS "contentType",octet_length(content) AS bytes,
-    sha256,created_at AS "createdAt" FROM accounting_documents WHERE month=$1 ORDER BY created_at DESC`, [month + "-01"])).rows;
+    to_char(month,'YYYY-MM') AS month,sha256,created_at AS "createdAt" FROM accounting_documents WHERE month=$1 ORDER BY created_at DESC`, [month + "-01"])).rows;
 }
 async function stripeMonth(start: Date, end: Date, references: string[]) {
   const range = { gte: Math.floor(start.getTime() / 1000), lt: Math.floor(end.getTime() / 1000) };
@@ -89,33 +90,68 @@ async function stripeMonth(start: Date, end: Date, references: string[]) {
   return { status: "available" as const, transactions, payouts, invoices: [...invoices.values()], totals: summarizeStripe(transactions, payouts) };
 }
 
-export async function accountingReport(month: string) {
-  const { start, end } = await monthBounds(month);
-  const [payments, settlements, documents] = await Promise.all([
+export function filterStripeAccounting(data: Awaited<ReturnType<typeof stripeMonth>>, filters: AccountingFilters) {
+  const currency = (value: string) => !filters.currency || value === filters.currency;
+  const state = (value: string) => filters.status === "all" || value === filters.status;
+  const transactions = data.transactions.filter(row => currency(row.currency) && state(row.status));
+  const payouts = data.payouts.filter(row => currency(row.currency) && state(row.status));
+  const invoices = data.invoices.filter(row => currency(row.currency) && state("paid"));
+  return { ...data, transactions, payouts, invoices, totals: summarizeStripe(transactions, payouts) };
+}
+export async function accountingReport(input: string | Record<string, unknown>) {
+  const filters = normalizeAccountingFilters(input);
+  const bounds = filters.month ? await monthBounds(filters.month) : (await pool.query<{ start: Date; end: Date }>(
+    `SELECT ($1::date::timestamp AT TIME ZONE $3) AS start,
+      (($2::date + interval '1 day')::timestamp AT TIME ZONE $3) AS "end"`, [filters.from, filters.to, accountingTimezone])).rows[0];
+  const { start, end } = bounds;
+  const months = accountingPeriodMonths(filters);
+  const fullMonths = fullAccountingMonths(filters);
+  const selectedProvider = (provider: string) => filters.provider === "ALL" || filters.provider === provider;
+  const [payments, settlements, periodDocuments] = await Promise.all([
     pool.query<{ id: number; provider: string; amount: number; currency: string; paid_at: Date; reference: string | null }>(
       `SELECT id,provider,amount,currency,paid_at,reference FROM subscription_payments
-       WHERE paid_at >= $1 AND paid_at < $2 ORDER BY paid_at,id`, [start, end]),
-    pool.query(`SELECT s.id,s.provider,s.currency,s.gross_minor AS "grossMinor",s.fees_minor AS "feesMinor",
+       WHERE paid_at >= $1 AND paid_at < $2 AND ($3::text='ALL' OR provider=$3)
+         AND ($4::text IS NULL OR UPPER(TRIM(currency))=$4) ORDER BY paid_at,id`, [start, end, filters.provider, filters.currency]),
+    pool.query(`SELECT s.id,s.provider,s.currency,to_char(s.month,'YYYY-MM') AS month,s.gross_minor AS "grossMinor",s.fees_minor AS "feesMinor",
       s.refunds_minor AS "refundsMinor",s.withheld_minor AS "withheldMinor",s.net_minor AS "netMinor",
       s.deposits_minor AS "depositsMinor",s.document_id AS "documentId",s.notes,s.updated_at AS "updatedAt"
-      FROM accounting_settlements s WHERE s.month=$1 ORDER BY s.provider,s.currency`, [month + "-01"]),
-    accountingDocuments(month),
+      FROM accounting_settlements s WHERE s.month >= $1::date AND s.month <= $2::date
+        AND ($3::text='ALL' OR s.provider=$3) AND ($4::text IS NULL OR s.currency=$4)
+      ORDER BY s.provider,s.month,s.currency`, [months[0] + "-01", months[months.length-1] + "-01", filters.provider, filters.currency]),
+    filters.month ? accountingDocuments(filters.month) : pool.query(`SELECT id,kind,filename,content_type AS "contentType",octet_length(content) AS bytes,
+      to_char(month,'YYYY-MM') AS month,sha256,created_at AS "createdAt" FROM accounting_documents
+      WHERE month >= $1::date AND month <= $2::date ORDER BY month,created_at DESC`,
+      [months[0] + "-01", months[months.length-1] + "-01"]).then(result => result.rows),
   ]);
-  let stripeData: Awaited<ReturnType<typeof stripeMonth>> | { status: "unavailable"; message: string };
-  try { stripeData = await stripeMonth(start, end, payments.rows.filter(row => row.provider === "STRIPE").map(row => row.reference ?? "")); }
-  catch { stripeData = { status: "unavailable", message: "No fue posible consultar Stripe. No se debe interpretar como un mes sin ingresos." }; }
-  const manual = payments.rows.filter(row => row.provider === "MANUAL").map(row => ({
-    id: row.id, amountMinor: row.amount, currency: row.currency.trim().toUpperCase(), paidAt: row.paid_at.toISOString(), reference: row.reference,
-  }));
-  const confirmed = settlements.rows.map(row => ({ ...row, ...Object.fromEntries(
-    ["grossMinor", "feesMinor", "refundsMinor", "withheldMinor", "netMinor", "depositsMinor"].map(key => {
-      const value = Number(row[key]); if (!Number.isSafeInteger(value)) throw Error("UNSAFE_AMOUNT"); return [key, value];
-    })) }));
-  return { month, timezone: accountingTimezone, start: start.toISOString(), endExclusive: end.toISOString(),
+  const documents = periodDocuments.filter(row => accountingDocumentMatches(row.kind, filters.provider));
+  let stripeData: Awaited<ReturnType<typeof stripeMonth>> | { status: "unavailable"; message: string } | { status: "not_selected" };
+  if (!selectedProvider("STRIPE")) stripeData = { status: "not_selected" };
+  else {
+    try { stripeData = filterStripeAccounting(await stripeMonth(start, end, payments.rows.filter(row => row.provider === "STRIPE").map(row => row.reference ?? "")), filters); }
+    catch { stripeData = { status: "unavailable", message: "No fue posible consultar Stripe. No se debe interpretar como un periodo sin ingresos." }; }
+  }
+  const manual = selectedProvider("MANUAL") && ["all", "registered"].includes(filters.status) ? payments.rows
+    .filter(row => row.provider === "MANUAL" && (!filters.currency || row.currency.trim().toUpperCase() === filters.currency)).map(row => ({
+      id: row.id, amountMinor: row.amount, currency: row.currency.trim().toUpperCase(), paidAt: row.paid_at.toISOString(), reference: row.reference,
+    })) : [];
+  // Store settlements have monthly granularity: never prorate or include a partial month's full amount.
+  const nativeSelected = ["APPLE", "GOOGLE_PLAY"].filter(selectedProvider);
+  const nativeState = ["all", "confirmed"].includes(filters.status);
+  const confirmed = nativeState ? settlements.rows.filter(row => selectedProvider(row.provider) &&
+    (!filters.currency || row.currency === filters.currency) && fullMonths.includes(row.month ?? filters.month)).map(row => ({
+    ...row, month: row.month ?? filters.month, ...Object.fromEntries(
+      ["grossMinor", "feesMinor", "refundsMinor", "withheldMinor", "netMinor", "depositsMinor"].map(key => {
+        const value = Number(row[key]); if (!Number.isSafeInteger(value)) throw Error("UNSAFE_AMOUNT"); return [key, value];
+      })) })) : [];
+  const pendingProviderMonths = nativeState ? nativeSelected.flatMap(provider => fullMonths
+    .filter(month => !confirmed.some(row => row.provider === provider && row.month === month)).map(month => ({ provider, month }))) : [];
+  const partialMonths = nativeState && nativeSelected.length ? months.filter(month => !fullMonths.includes(month)) : [];
+  return { month: filters.month, filters, periodLabel: filters.month ?? filters.from + " a " + filters.to,
+    timezone: accountingTimezone, start: start.toISOString(), endExclusive: end.toISOString(),
     generatedAt: new Date().toISOString(), stripeMode: process.env.STRIPE_SECRET_KEY?.startsWith("sk_live_") ? "live" : "test",
-    stripe: stripeData, manual, documents, settlements: confirmed,
-    pendingProviders: ["APPLE", "GOOGLE_PLAY"].filter(provider => !confirmed.some(row => row.provider === provider)),
-    guidance: "Reporte de apoyo contable. Cobros, saldo y transferencias son conceptos diferentes. Conciliar transferencias con el banco y reportes de Apple/Google. Sin movimientos no implica automáticamente una declaración en ceros. Los comprobantes Stripe no sustituyen un CFDI XML timbrado.",
+    stripe: stripeData, manual, documents, settlements: confirmed, partialMonths, pendingProviderMonths,
+    pendingProviders: [...new Set(pendingProviderMonths.map(row => row.provider))],
+    guidance: "Reporte de apoyo contable. Cobros, saldo y transferencias son conceptos diferentes. Conciliar transferencias con el banco y reportes de Apple/Google. Sin coincidencias con los filtros no implica automáticamente una declaración en ceros. Los comprobantes Stripe no sustituyen un CFDI XML timbrado.",
   };
 }
 
@@ -126,18 +162,20 @@ export function csvCell(value: unknown): string {
   return '"' + text.replace(/"/g, '""') + '"';
 }
 export function reportCsv(report: Awaited<ReturnType<typeof accountingReport>>) {
-  const rows: unknown[][] = [["mes", "generado_en", "zona_horaria", "fuente", "tipo", "estado", "fecha", "referencia", "moneda", "importe", "comision", "neto", "nota"]];
-  const add = (values: unknown[]) => rows.push([report.month, report.generatedAt, report.timezone, ...values]);
+  const rows: unknown[][] = [["desde", "hasta", "filtro_proveedor", "filtro_moneda", "filtro_estado", "generado_en", "zona_horaria", "fuente", "tipo", "estado", "fecha", "referencia", "moneda", "importe", "comision", "neto", "nota"]];
+  const add = (values: unknown[]) => rows.push([report.filters.from, report.filters.to, report.filters.provider, report.filters.currency ?? "TODAS", report.filters.status, report.generatedAt, report.timezone, ...values]);
   const zeroDecimals = new Set(["BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "VND", "VUV", "XAF", "XOF", "XPF"]);
   const amount = (minor: number, currency: string) => minor / (zeroDecimals.has(currency) ? 1 : 100);
+  add(["REPORTE", "FILTROS", "APLICADOS", "", "", report.filters.currency ?? "", "", "", "", "Criterios de selección; no es un movimiento financiero"]);
   if (report.stripe.status === "available") {
     for (const row of report.stripe.transactions) add(["STRIPE", row.type, row.status, row.date, row.id, row.currency, amount(row.amountMinor,row.currency), amount(row.feeMinor,row.currency), amount(row.netMinor,row.currency), "Movimiento de saldo; no sumar las transferencias a los cobros"]);
     for (const row of report.stripe.payouts) add(["STRIPE", "TRANSFERENCIA", row.status, row.arrivalDate, row.id, row.currency, amount(row.amountMinor,row.currency), "", "", "Fecha de llegada estimada por Stripe; conciliar con banco"]);
-    if (!report.stripe.transactions.length && !report.stripe.payouts.length) add(["STRIPE", "ESTADO", "SIN_MOVIMIENTOS", "", "", "", "", "", "", "No determina obligaciones fiscales"]);
-  } else add(["STRIPE", "ESTADO", "NO_DISPONIBLE", "", "", "", "", "", "", report.stripe.message]);
+    if (!report.stripe.transactions.length && !report.stripe.payouts.length) add(["STRIPE", "ESTADO", "SIN_COINCIDENCIAS", "", "", "", "", "", "", "Sin coincidencias con los filtros; no determina obligaciones fiscales"]);
+  } else if (report.stripe.status === "unavailable") add(["STRIPE", "ESTADO", "NO_DISPONIBLE", "", "", "", "", "", "", report.stripe.message]);
   for (const row of report.manual) add(["MANUAL", "PAGO_REGISTRADO", "REGISTRADO", row.paidAt, row.reference, row.currency, amount(row.amountMinor,row.currency), "", "", "Importe registrado; conciliar con banco"]);
   for (const row of report.settlements) add([row.provider, "LIQUIDACION", "CON_DOCUMENTO", "", row.documentId, row.currency, amount(row.grossMinor,row.currency), amount(row.feesMinor,row.currency), amount(row.netMinor,row.currency),
-    `Reembolsos=${amount(row.refundsMinor,row.currency)}; retenciones=${amount(row.withheldMinor,row.currency)}; depósitos=${amount(row.depositsMinor,row.currency)} ${row.currency}. ${row.notes}`]);
-  for (const provider of report.pendingProviders) add([provider, "ESTADO", "PENDIENTE_REPORTE", "", "", "", "", "", "", "Sin conciliación; no equivale a cero"]);
+    `Mes completo ${row.month}. Reembolsos=${amount(row.refundsMinor,row.currency)}; retenciones=${amount(row.withheldMinor,row.currency)}; depósitos=${amount(row.depositsMinor,row.currency)} ${row.currency}. ${row.notes}`]);
+  for (const pending of report.pendingProviderMonths) add([pending.provider, "ESTADO", "PENDIENTE_REPORTE", pending.month, "", "", "", "", "", "Sin conciliación de ese mes/moneda; no equivale a cero"]);
+  for (const month of report.partialMonths) add([report.filters.provider, "ESTADO", "MES_PARCIAL", month, "", "", "", "", "", "Liquidaciones de tienda excluidas: solo existen importes mensuales y no se prorratean"]);
   return "\uFEFF" + rows.map(row => row.map(csvCell).join(",")).join("\r\n");
 }

@@ -60,3 +60,13 @@ Las comprobaciones de base de datos en memoria y navegador validan el flujo con 
 - Portal https://tocadapp.com/contabilidad/login disponible con HTTP 200; API saludable; reportes anónimos devuelven 401. No se generaron cobros ni registros ficticios de ingresos en producción.
 
 Para entregar acceso al contador, entrar con la cuenta administradora en https://tocadapp.com/dashboard/admin/accounting y crear sus credenciales. La contraseña se muestra una sola vez y debe compartirse de forma privada.
+
+## Filtros de consulta
+
+El reporte admite mes completo o un rango Desde/Hasta inclusivo, proveedor (Stripe, App Store, Google Play o manual), moneda y estado. Los mismos criterios se envían al CSV y se muestran en el resumen impreso/PDF. No requiere migraciones adicionales.
+
+El estado respeta el tipo de registro: saldo disponible/pendiente; transferencia pagada, pendiente, en tránsito, fallida o cancelada; comprobante pagado; pago manual registrado; o liquidación de tienda conciliada. No se inventa un estado de cobro a partir del estado del saldo. Los totales se recalculan sobre los registros que coinciden.
+
+Los documentos se recuperan por meses superpuestos con el rango y por proveedor cuando el tipo lo identifica. CFDI, estados bancarios y otros respaldos compartidos se mantienen. No se filtran originales por moneda/estado porque esos datos no están clasificados en los documentos.
+
+Las liquidaciones de las tiendas se incluyen únicamente cuando el rango abarca su mes completo. Los meses parciales quedan señalados y no se prorratean; sus documentos mensuales siguen disponibles. En periodos trimestrales o anuales se identifica por separado cada mes sin conciliación.

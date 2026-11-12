@@ -1,3 +1,4 @@
+import { normalizeAccountingFilters } from "../services/accountingFilters";
 import type { Request, Response } from "express";
 import { accountingCookieName, accountingCookieOptions, auditAccounting, changeAccountant,
   createAccountant, listAccountants, loginAccountant, logoutAccountant, requireAccountant,
@@ -47,16 +48,16 @@ export const accountantHandlers = {
     res.json({ ok: true });
   }),
   report: handler(async (req, res) => {
-    const selected = month(req);
-    const report = await accountingReport(selected);
-    await auditAccounting(actor(req), "VIEW_REPORT", selected);
+    const selected = normalizeAccountingFilters(req.query);
+    const report = await accountingReport(req.query);
+    await auditAccounting(actor(req), "VIEW_REPORT", selected.month ?? undefined, selected);
     res.json(report);
   }),
   export: handler(async (req, res) => {
-    const selected = month(req);
-    const report = await accountingReport(selected);
-    await auditAccounting(actor(req), "EXPORT_REPORT", selected);
-    res.attachment(`tocadapp-contabilidad-${selected}.csv`).type("text/csv; charset=utf-8").send(reportCsv(report));
+    const selected = normalizeAccountingFilters(req.query);
+    const report = await accountingReport(req.query);
+    await auditAccounting(actor(req), "EXPORT_REPORT", selected.month ?? undefined, selected);
+    res.attachment(`tocadapp-contabilidad-${selected.month ?? selected.from + "_" + selected.to}.csv`).type("text/csv; charset=utf-8").send(reportCsv(report));
   }),
   document: handler(async (req, res) => {
     const documentId = id(req);
