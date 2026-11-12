@@ -70,3 +70,11 @@ El estado respeta el tipo de registro: saldo disponible/pendiente; transferencia
 Los documentos se recuperan por meses superpuestos con el rango y por proveedor cuando el tipo lo identifica. CFDI, estados bancarios y otros respaldos compartidos se mantienen. No se filtran originales por moneda/estado porque esos datos no están clasificados en los documentos.
 
 Las liquidaciones de las tiendas se incluyen únicamente cuando el rango abarca su mes completo. Los meses parciales quedan señalados y no se prorratean; sus documentos mensuales siguen disponibles. En periodos trimestrales o anuales se identifica por separado cada mes sin conciliación.
+
+### Despliegue de filtros: 2026-11-12
+
+- API 1e692e9 y web 2e570bd subidas y desplegadas con autorización. Cambio limitado a filtros, exportaciones y sus pruebas; no se ejecutaron migraciones ni se cambió la configuración del servidor.
+- Suites completas: 205 pruebas de API y 25 de web pasaron; una de API quedó omitida. TypeScript, ESLint y builds de producción pasaron. En las imágenes del servidor pasaron las 27 pruebas contables de API y 10 de web.
+- Doce comprobaciones de PostgreSQL en memoria verificaron también el rango inclusivo, moneda/proveedor y el día histórico de 25 horas. Doce flujos de navegador comprobaron las selecciones, el CSV, PDF, vista móvil y bloqueo de fechas invertidas.
+- Verificación por HTTPS en producción con acceso temporal: API y navegador aplicaron Desde/Hasta, proveedor, moneda y estado; el CSV registró exactamente los mismos criterios; el rango invertido devolvió 400. Se mantuvieron la separación de permisos y la revocación inmediata. El acceso temporal y sus sesiones se eliminaron.
+- Imágenes anteriores conservadas como before-accounting-filters. Portal y API saludables tras el despliegue.
