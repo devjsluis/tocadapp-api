@@ -1,3 +1,4 @@
+import { accountingRouter, adminAccountingRouter } from "./routes/accounting.routes";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -59,6 +60,8 @@ app.use(
 );
 
 app.use(express.json());
+app.use("/accounting", accountingRouter);
+app.use("/admin/accounting", adminAccountingRouter);
 app.use("/subscriptions/apple", appleSubscriptionsRouter);
 app.use("/webhooks/apple", appleNotificationsRouter);
 
